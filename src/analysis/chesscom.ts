@@ -21,6 +21,18 @@ export type ChessComGame = {
   black: ChessComColor;
 };
 
+export type ChessComProfile = {
+  username: string;
+  name?: string;
+  avatar?: string;
+  title?: string;
+  followers?: number;
+  country?: string;
+  joined?: number;
+  last_online?: number;
+  status?: string;
+};
+
 export type ImportProgress = {
   label: string;
   done: number;
@@ -35,10 +47,29 @@ type GamesResponse = {
   games: ChessComGame[];
 };
 
-const pause = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
-
 function cleanUsername(username: string) {
-  return username.trim().replace(/^@/, "").toLowerCase();
+  const user = username.trim().replace(/^@/, "").toLowerCase();
+  if (user && !/^[a-z0-9_-]{2,50}$/.test(user)) {
+    throw new Error("Enter a valid Chess.com username.");
+  }
+  return user;
+}
+
+export async function fetchChessComProfile(username: string): Promise<ChessComProfile> {
+  const user = cleanUsername(username);
+  if (!user) {
+    throw new Error("Enter a Chess.com username first.");
+  }
+
+  const response = await fetch(`https://api.chess.com/pub/player/${encodeURIComponent(user)}`);
+  if (response.status === 404) {
+    throw new Error(`No public Chess.com profile was found for "${username}".`);
+  }
+  if (!response.ok) {
+    throw new Error(`Chess.com returned ${response.status} while connecting.`);
+  }
+
+  return (await response.json()) as ChessComProfile;
 }
 
 export async function fetchChessComGames(
@@ -64,42 +95,46 @@ export async function fetchChessComGames(
   }
 
   const archiveData = (await archiveResponse.json()) as ArchiveResponse;
-  const selectedArchives = archiveData.archives.slice(-monthLimit);
+  const selectedArchives = archiveData.archives.slice(-monthLimit).reverse();
   const games: ChessComGame[] = [];
+  let done = 0;
 
-  for (const [index, archiveUrl] of selectedArchives.entries()) {
-    const month = archiveUrl.split("/").slice(-2).join("/");
-    onProgress?.({ label: `Importing ${month}`, done: index, total: selectedArchives.length });
+  for (let batchStart = 0; batchStart < selectedArchives.length; batchStart += 4) {
+    const batch = selectedArchives.slice(batchStart, batchStart + 4);
+    await Promise.all(batch.map(async (archiveUrl) => {
+      const month = archiveUrl.split("/").slice(-2).join("/");
+      onProgress?.({ label: `Importing ${month}`, done, total: selectedArchives.length });
 
-    const response = await fetch(archiveUrl);
-    if (response.status === 429) {
-      throw new Error("Chess.com rate-limited the import. Try fewer months or wait a minute.");
-    }
-    if (!response.ok) {
-      throw new Error(`Chess.com returned ${response.status} while reading ${month}.`);
-    }
+      const response = await fetch(archiveUrl);
+      if (response.status === 429) {
+        throw new Error("Chess.com rate-limited the import. Try fewer months or wait a minute.");
+      }
+      if (!response.ok) {
+        throw new Error(`Chess.com returned ${response.status} while reading ${month}.`);
+      }
 
-    const data = (await response.json()) as GamesResponse;
-    games.push(
-      ...data.games.filter((game) => {
-        const isStandardChess = !game.rules || game.rules === "chess";
-        const hasPgn = Boolean(game.pgn);
-        const matchesTimeClass = timeClass === "all" || game.time_class === timeClass;
-        return isStandardChess && hasPgn && matchesTimeClass;
-      })
-    );
-
-    await pause(280);
+      const data = (await response.json()) as GamesResponse;
+      games.push(
+        ...data.games.filter((game) => {
+          const isStandardChess = !game.rules || game.rules === "chess";
+          const hasPgn = Boolean(game.pgn);
+          const matchesTimeClass = timeClass === "all" || game.time_class === timeClass;
+          return isStandardChess && hasPgn && matchesTimeClass;
+        })
+      );
+      done += 1;
+      onProgress?.({ label: `Imported ${month}`, done, total: selectedArchives.length });
+    }));
   }
 
   onProgress?.({ label: "Import complete", done: selectedArchives.length, total: selectedArchives.length });
-  return games;
+  return games.sort((a, b) => (a.end_time ?? 0) - (b.end_time ?? 0));
 }
 
 export function splitPgnText(pgnText: string) {
   return pgnText
     .trim()
-    .split(/\n(?=\[Event\s)/g)
+    .split(/\r?\n(?=\[Event\s)/g)
     .map((pgn) => pgn.trim())
     .filter(Boolean);
 }

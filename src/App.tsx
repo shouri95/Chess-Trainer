@@ -1,13 +1,18 @@
-import { ReactNode, useMemo, useState } from "react";
+import { Component, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Chess } from "chess.js";
 import {
-  Activity, ArrowLeft, BarChart3, Brain, ChevronRight,
+  ArrowLeft, BarChart3, Brain, ChevronLeft, ChevronRight,
   Crown, Dumbbell, FileUp, LoaderCircle, Search, Shield,
-  Swords, Target, TrendingUp, Zap
+  Swords, Target, TrendingUp, Zap, Menu, LayoutGrid, Skull, Sword, BookOpen, AlertTriangle, CheckCircle2,
+  User, X, RefreshCw, Link2, Clock3, Repeat2
 } from "lucide-react";
-import { fetchChessComGames, ImportProgress } from "./analysis/chesscom";
-import type { AnalysisReport, MoveIssue, PatternSummary, Phase, SkillDimension, TrainingRecommendation } from "./analysis/patterns";
+import { fetchChessComGames, fetchChessComProfile, ImportProgress } from "./analysis/chesscom";
+import type { AnalysisReport, GameSummary, MoveIssue, MoveReview, MoveReviewQuality, PatternSummary, Phase, SkillDimension } from "./analysis/patterns";
 import ChessBoard from "./components/ChessBoard";
 import DrillPanel from "./components/DrillPanel";
+import EngineReadout, { formatEval as formatEngineEval, formatUci as formatEngineUci } from "./components/EngineReadout";
+import { EngineEvaluation, useStockfish } from "./engine/useStockfish";
+import { classifyMoveQuality, DEFAULT_ENGINE_DEPTH, DEFAULT_ENGINE_MULTIPV, type MoveEngineResult } from "./engine/EngineService";
 
 const samplePgn = `[Event "Training sample"]
 [Site "https://www.chess.com/game/live/sample"]
@@ -21,6 +26,16 @@ const samplePgn = `[Event "Training sample"]
 
 const phaseLabels: Record<Phase, string> = { opening: "Opening", middlegame: "Middlegame", endgame: "Endgame" };
 const phases: Phase[] = ["opening", "middlegame", "endgame"];
+const ENGINE_DEPTH = DEFAULT_ENGINE_DEPTH;
+type ReviewBucket = "blunder" | "miss" | "mistake" | "good" | "best";
+type TrainableReviewBucket = "blunder" | "miss" | "mistake";
+
+type AnalysisStart = {
+  fen: string;
+  flipped?: boolean;
+  title?: string;
+  gamePgn?: string;
+};
 
 const dimensionLabels: Record<SkillDimension, string> = {
   tactical: "Tactical",
@@ -37,14 +52,97 @@ export default function App() {
   const [username, setUsername] = useState("");
   const [months, setMonths] = useState(3);
   const [gameLimit, setGameLimit] = useState(150);
-  const [timeClass, setTimeClass] = useState<"all" | "rapid" | "blitz" | "bullet" | "daily">("rapid");
+  const [timeClass, setTimeClass] = useState<"all" | "rapid" | "blitz" | "bullet" | "daily">("all");
   const [pgnText, setPgnText] = useState("");
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [selectedIssue, setSelectedIssue] = useState<MoveIssue | null>(null);
   const [progress, setProgress] = useState<ImportProgress | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [showDrills, setShowDrills] = useState(false);
+  const [activeView, setActiveView] = useState<"dashboard" | "games" | "mistakes" | "drill" | "analysis">("dashboard");
+  const [qualityFilter, setQualityFilter] = useState<MoveReviewQuality | "all">("all");
+  const [selectedPatternId, setSelectedPatternId] = useState<string>("all");
+  const [selectedGameId, setSelectedGameId] = useState(-1);
+  const [analysisStart, setAnalysisStart] = useState<AnalysisStart | null>(null);
+  const [analysisReturnView, setAnalysisReturnView] = useState<"dashboard" | "games" | "mistakes" | "drill">("dashboard");
+  const [drillStartInPuzzle, setDrillStartInPuzzle] = useState(false);
+  const [drillLaunchKey, setDrillLaunchKey] = useState(0);
+  const [activeMistakeReviewId, setActiveMistakeReviewId] = useState("");
+  const [profileOpen, setProfileOpen] = useState(false);
+  const { evaluatePosition, analyzeMovePair } = useStockfish();
+  const analysisAbortRef = useRef<AbortController | null>(null);
+
+  const openAnalysis = (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => {
+    if (!fen) return;
+    if (activeView !== "analysis") setAnalysisReturnView(activeView);
+    setAnalysisStart({ fen, flipped, title, ...context });
+    setActiveView("analysis");
+  };
+
+  useEffect(() => {
+    const saved = localStorage.getItem("pattern-coach-profile");
+    if (!saved) return;
+    try {
+      const parsed = JSON.parse(saved) as { username?: string; months?: number; gameLimit?: number; timeClass?: typeof timeClass };
+      if (parsed.username) setUsername(parsed.username);
+      if (parsed.months) setMonths(Math.min(parsed.months, 12));
+      if (parsed.gameLimit) setGameLimit(Math.min(parsed.gameLimit, 500));
+      if (parsed.timeClass) setTimeClass(parsed.timeClass);
+    } catch {
+      localStorage.removeItem("pattern-coach-profile");
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("pattern-coach-profile", JSON.stringify({ username, months, gameLimit, timeClass }));
+  }, [username, months, gameLimit, timeClass]);
+
+  useEffect(() => {
+    return () => analysisAbortRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!report) return;
+    const candidates = report.moveReviews
+      .filter(review => !review.engineReviewed)
+      .sort((a, b) => (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId));
+    if (!candidates.length) return;
+    let cancelled = false;
+
+    async function refineFlaggedMoves() {
+      const updates = new Map<string, MoveReview>();
+      for (const review of candidates) {
+        if (cancelled) return;
+        try {
+          const engine = await analyzeMovePair({
+            fenBefore: review.fenBefore,
+            playedUci: review.uci,
+            depth: ENGINE_DEPTH,
+            multipv: DEFAULT_ENGINE_MULTIPV,
+          });
+          const refined = refineReviewWithEngine(review, engine);
+          updates.set(review.id, refined);
+        } catch {
+          updates.set(review.id, { ...review, engineReviewed: true });
+        }
+      }
+      if (cancelled || !updates.size) return;
+      setReport(current => {
+        if (!current) return current;
+        return {
+          ...current,
+          moveReviews: current.moveReviews.map(review => updates.get(review.id) || review),
+          issues: addEngineIssues(current.issues.map(issue => {
+            const update = [...updates.values()].find(review => review.fenBefore === issue.fenBefore && review.san === issue.san);
+            return update ? { ...issue, quality: update.quality } : issue;
+          }), updates),
+        };
+      });
+    }
+
+    refineFlaggedMoves();
+    return () => { cancelled = true; };
+  }, [report, analyzeMovePair]);
 
   const topPhase = useMemo<Phase>(() => {
     if (!report) return "opening";
@@ -54,194 +152,566 @@ export default function App() {
   const boardHighlights = useMemo(() => {
     const h: Record<string, string> = {};
     if (!selectedIssue) return h;
-    const san = selectedIssue.san;
-    let sq = san.includes("x") ? san.replace(/.*x/, "").replace(/[+#]/g, "") : san.replace(/[+#]/g, "");
-    if (sq.length >= 2) h[sq.slice(-2)] = "rgba(220,38,38,0.18)";
+    const target = selectedIssue.uci.slice(2, 4);
+    if (/^[a-h][1-8]$/.test(target)) h[target] = "rgba(220,38,38,0.18)";
     return h;
   }, [selectedIssue]);
 
   async function runChessComImport() {
     setError(""); setLoading(true); setProgress(null);
+    analysisAbortRef.current?.abort();
+    const controller = new AbortController();
+    analysisAbortRef.current = controller;
     try {
       const games = await fetchChessComGames(username, months, timeClass, setProgress);
-      const gamesForAnalysis = games.slice(-gameLimit);
+      const gamesForAnalysis = games
+        .slice()
+        .sort((a, b) => (a.end_time ?? 0) - (b.end_time ?? 0))
+        .slice(-gameLimit);
       setProgress({ label: `Analyzing ${gamesForAnalysis.length} games`, done: 1, total: 1 });
-      const nextReport = await analyzeGamesInWorker({ kind: "chesscom", username, games: gamesForAnalysis });
+      const nextReport = await analyzeGamesInWorker({ kind: "chesscom", username, games: gamesForAnalysis }, controller.signal);
       setReport(nextReport);
       setSelectedIssue(nextReport.summaries[0]?.examples[0] ?? null);
+      setQualityFilter("all");
+      setSelectedPatternId("all");
+      setSelectedGameId(-1);
+      setActiveView("dashboard");
+      setProfileOpen(false);
       if (!nextReport.games) setError("No standard chess games matched that username and filter.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "The import failed.");
-    } finally { setLoading(false); }
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        setError(err instanceof Error ? err.message : "The import failed.");
+      }
+    } finally {
+      if (analysisAbortRef.current === controller) analysisAbortRef.current = null;
+      setLoading(false);
+    }
   }
 
-  async function runPgnAnalysis(nextText = pgnText) {
+  async function runChessComConnect() {
     setError("");
+    setLoading(true);
+    setProgress({ label: "Connecting Chess.com profile", done: 0, total: 1 });
     try {
-      const nextReport = await analyzeGamesInWorker({ kind: "pgn", username: username || "You", pgnText: nextText });
+      const profile = await fetchChessComProfile(username);
+      setUsername(profile.username || username.trim());
+      setProgress({ label: "Profile connected", done: 1, total: 1 });
+      setProfileOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not connect that Chess.com profile.");
+    } finally {
+      setLoading(false);
+      window.setTimeout(() => setProgress(null), 700);
+    }
+  }
+
+  async function runPgnAnalysis(nextText = pgnText, usernameOverride?: string) {
+    setError(""); setLoading(true); setProgress({ label: "Analyzing PGN", done: 0, total: 1 });
+    analysisAbortRef.current?.abort();
+    const controller = new AbortController();
+    analysisAbortRef.current = controller;
+    try {
+      const nextReport = await analyzeGamesInWorker({ kind: "pgn", username: usernameOverride || username || "You", pgnText: nextText }, controller.signal);
       setReport(nextReport);
       setSelectedIssue(nextReport.summaries[0]?.examples[0] ?? null);
+      setQualityFilter("all");
+      setSelectedPatternId("all");
+      setSelectedGameId(-1);
+      setActiveView("dashboard");
+      setProfileOpen(false);
       if (!nextReport.games) setError("No games were found in that PGN.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "The PGN could not be analyzed.");
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        setError(err instanceof Error ? err.message : "The PGN could not be analyzed.");
+      }
+    } finally {
+      if (analysisAbortRef.current === controller) analysisAbortRef.current = null;
+      setProgress(null);
+      setLoading(false);
     }
   }
 
   return (
+    <ErrorBoundary>
     <main className="app-shell">
-      <section className="workspace">
+      <section className={`workspace view-${activeView}`}>
         <header className="topbar">
+          <button className="icon-button"><Menu size={21} /></button>
           <div className="brand-lockup">
-            <div className="mark">♘</div>
-            <div>
-              <p className="eyebrow">Chess analysis</p>
-              <h1>Pattern Coach</h1>
-            </div>
+            <h1>Pattern Coach</h1>
           </div>
-          <div className="source-note">
-            <Activity size={16} />
-            <span>{report ? `${report.games} games` : "Ready"}</span>
-          </div>
+          <button className={`avatar ${username ? "connected" : ""}`} onClick={() => setProfileOpen(true)} aria-label="Open profile">
+            {username ? username.slice(0, 2).toUpperCase() : <User size={17} />}
+          </button>
         </header>
 
-        {report && (
-          <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
-            <button className="ghost-button" onClick={() => setReport(null)}>
-              <ArrowLeft size={16} /> New analysis
-            </button>
-            <button className="primary-button" onClick={() => setShowDrills(true)}>
-              <Dumbbell size={16} /> Drill mode
-            </button>
-          </div>
+        {progress && activeView === "dashboard" && <ImportStatus progress={progress} />}
+
+        {error && <div className="error-banner">{error}</div>}
+
+        {report ? (
+          <>
+            {activeView === "dashboard" && (
+              <Dashboard
+                report={report}
+                selectedIssue={selectedIssue}
+                setSelectedIssue={setSelectedIssue}
+                topPhase={topPhase}
+                boardHighlights={boardHighlights}
+                openAnalysis={openAnalysis}
+                openQuality={(quality) => {
+                  setQualityFilter(quality);
+                  setDrillStartInPuzzle(false);
+                  setDrillLaunchKey(key => key + 1);
+                  setActiveView(quality === "good" || quality === "best" ? "games" : "drill");
+                }}
+                trainNow={() => {
+                  setQualityFilter("all");
+                  setSelectedPatternId("all");
+                  setDrillStartInPuzzle(false);
+                  setDrillLaunchKey(key => key + 1);
+                  setActiveView("drill");
+                }}
+              />
+            )}
+            {activeView === "games" && (
+              <GamesView
+                report={report}
+                selectedGameId={selectedGameId}
+                setSelectedGameId={setSelectedGameId}
+                openMove={(review) => {
+                  const issue = report.issues.find(candidate => candidate.fenBefore === review.fenBefore && candidate.san === review.san);
+                  if (issue) setSelectedIssue(issue);
+                  const bucket = qualityBucket(review.quality);
+                  setQualityFilter(bucket);
+                  setActiveView(bucket === "good" || bucket === "best" ? "games" : "drill");
+                }}
+                openAnalysis={openAnalysis}
+              />
+            )}
+            {activeView === "mistakes" && (
+              <MistakeLab
+                report={report}
+                selectedIssue={selectedIssue}
+                setSelectedIssue={setSelectedIssue}
+                selectedPatternId={selectedPatternId}
+                setSelectedPatternId={setSelectedPatternId}
+                selectedReviewId={activeMistakeReviewId}
+                setSelectedReviewId={setActiveMistakeReviewId}
+                startDrill={(quality, patternId = "all", issue) => {
+                  setQualityFilter(quality);
+                  setSelectedPatternId(patternId);
+                  if (issue) setSelectedIssue(issue);
+                  setDrillStartInPuzzle(true);
+                  setDrillLaunchKey(key => key + 1);
+                  setActiveView("drill");
+                }}
+                openAnalysis={openAnalysis}
+              />
+            )}
+            {activeView === "analysis" && analysisStart && (
+              <AnalysisView
+                start={analysisStart}
+                back={() => setActiveView(analysisReturnView)}
+              />
+            )}
+            {activeView === "drill" && (
+              <DrillPanel
+                issues={report.issues}
+                summaries={report.summaries}
+                initialIssue={selectedIssue}
+                qualityFilter={qualityFilter}
+                patternId={selectedPatternId}
+                startInPuzzle={drillStartInPuzzle}
+                launchKey={drillLaunchKey}
+                onQualityFilterChange={setQualityFilter}
+                onPatternChange={setSelectedPatternId}
+                onAnalyze={(fen, flipped, title) => openAnalysis(fen, flipped, title)}
+                returnToSourceOnPuzzleBack={drillStartInPuzzle}
+                onBack={() => setActiveView("mistakes")}
+              />
+            )}
+          </>
+        ) : (
+          <ConnectedDashboard
+            username={username}
+            loading={loading}
+            openProfile={() => setProfileOpen(true)}
+            syncGames={runChessComImport}
+            loadSample={() => { setUsername("You"); setPgnText(samplePgn); runPgnAnalysis(samplePgn, "You"); }}
+          />
         )}
 
-        <section className="control-strip">
+        {profileOpen && (
+          <ProfileSheet
+            username={username}
+            setUsername={setUsername}
+            months={months}
+            setMonths={setMonths}
+            gameLimit={gameLimit}
+            setGameLimit={setGameLimit}
+            timeClass={timeClass}
+            setTimeClass={setTimeClass}
+            pgnText={pgnText}
+            setPgnText={setPgnText}
+            loading={loading}
+            runChessComConnect={runChessComConnect}
+            runChessComImport={runChessComImport}
+            runPgnAnalysis={runPgnAnalysis}
+            loadSample={() => { setUsername("You"); setPgnText(samplePgn); runPgnAnalysis(samplePgn, "You"); }}
+            close={() => setProfileOpen(false)}
+          />
+        )}
+
+        <nav className={`bottom-nav view-${activeView}`}>
+          <button className={activeView === "dashboard" ? "active" : ""} onClick={() => setActiveView("dashboard")}><LayoutGrid size={20} /><span>Dashboard</span></button>
+          <button className={report && activeView === "games" ? "active" : ""} onClick={() => report ? setActiveView("games") : setProfileOpen(true)}><BookOpen size={20} /><span>Games</span></button>
+          <button className={report && activeView === "mistakes" ? "active" : ""} onClick={() => report ? setActiveView("mistakes") : setProfileOpen(true)}><Skull size={20} /><span>Mistake Lab</span></button>
+          <button className={report && activeView === "drill" ? "active" : ""} onClick={() => {
+            if (!report) {
+              setProfileOpen(true);
+              return;
+            }
+            setDrillStartInPuzzle(false);
+            setDrillLaunchKey(key => key + 1);
+            setActiveView("drill");
+          }}><Sword size={20} /><span>Drill Mode</span></button>
+        </nav>
+      </section>
+    </main>
+    </ErrorBoundary>
+  );
+}
+
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <main className="app-shell">
+        <section className="workspace">
+          <div className="error-boundary-card">
+            <h1>Pattern Coach hit a snag</h1>
+            <p>The board did not crash silently. Refresh and try the last action again.</p>
+            <pre>{this.state.error.message}</pre>
+            <button className="primary-button" onClick={() => location.reload()}>Reload app</button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+}
+
+function ImportStatus({ progress }: { progress: ImportProgress }) {
+  const pct = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
+  return (
+    <div className="import-status">
+      <ProgressRing value={pct} size={48} />
+      <div>
+        <strong>{progress.label}</strong>
+        <span>{pct}% complete</span>
+      </div>
+    </div>
+  );
+}
+
+function ProgressRing({ value, size = 68 }: { value: number; size?: number }) {
+  const clamped = Math.max(0, Math.min(100, value));
+  return (
+    <span
+      className="progress-ring"
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={clamped}
+      style={{
+        width: size,
+        height: size,
+        background: `conic-gradient(var(--accent) ${clamped * 3.6}deg, rgba(255,255,255,0.08) 0deg)`,
+      }}
+      aria-label={`${clamped}% complete`}
+    >
+      <b>{clamped}</b>
+    </span>
+  );
+}
+
+type WorkerPayload = { kind: "chesscom"; username: string; games: any[] } | { kind: "pgn"; username: string; pgnText: string };
+
+function analyzeGamesInWorker(payload: WorkerPayload, signal?: AbortSignal) {
+  return new Promise<AnalysisReport>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Analysis was cancelled.", "AbortError"));
+      return;
+    }
+    const w = new Worker(new URL("./analysis/analyzer.worker.ts", import.meta.url), { type: "module" });
+    const abort = () => {
+      w.terminate();
+      reject(new DOMException("Analysis was cancelled.", "AbortError"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    const cleanup = () => {
+      signal?.removeEventListener("abort", abort);
+      w.onmessage = null;
+      w.onerror = null;
+    };
+    w.onmessage = (e: MessageEvent<{ ok: true; report: AnalysisReport } | { ok: false; error: string }>) => {
+      cleanup(); w.terminate(); if (e.data.ok) resolve(e.data.report); else reject(new Error(e.data.error));
+    };
+    w.onerror = e => { cleanup(); w.terminate(); reject(new Error(e.message || "Worker failed.")); };
+    w.postMessage(payload);
+  });
+}
+
+function ConnectedDashboard({ username, loading, openProfile, syncGames, loadSample }: {
+  username: string;
+  loading: boolean;
+  openProfile: () => void;
+  syncGames: () => void;
+  loadSample: () => void;
+}) {
+  return (
+    <section className="dashboard mobile-screen">
+      <div className="home-hero">
+        <span className="connection-pill">{username ? "Chess.com profile ready" : "Profile not connected"}</span>
+        <h2>{username ? `Ready to coach ${username}` : "Connect your chess profile"}</h2>
+        <p>Your dashboard becomes a live coaching feed once Pattern Coach can read your recent games.</p>
+        <div className="home-actions">
+          {username ? (
+            <button className="primary-button" onClick={syncGames} disabled={loading}>
+              {loading ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />} Sync games
+            </button>
+          ) : (
+            <button className="primary-button" onClick={openProfile}><Link2 size={16} /> Connect profile</button>
+          )}
+          <button className="ghost-button" onClick={loadSample}>Try sample</button>
+        </div>
+      </div>
+
+      <div className="onboarding-rail">
+        <div>
+          <User size={18} />
+          <strong>Connect</strong>
+          <span>Add a Chess.com username from profile.</span>
+        </div>
+        <div>
+          <Search size={18} />
+          <strong>Analyze</strong>
+          <span>Recent public games become reviewed moves.</span>
+        </div>
+        <div>
+          <Sword size={18} />
+          <strong>Train</strong>
+          <span>Drill your own blunders, mistakes, and inaccuracies.</span>
+        </div>
+      </div>
+
+      <section className="trainer-panel next-level-card">
+        <div className="panel-heading"><Clock3 size={16} /><h2>Coming coaching loop</h2></div>
+        <p>After sync, this home screen should keep resurfacing the positions you failed, the patterns that repeat, and the drill queue due today.</p>
+      </section>
+    </section>
+  );
+}
+
+function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, setGameLimit, timeClass, setTimeClass, pgnText, setPgnText, loading, runChessComConnect, runChessComImport, runPgnAnalysis, loadSample, close }: {
+  username: string;
+  setUsername: (value: string) => void;
+  months: number;
+  setMonths: (value: number) => void;
+  gameLimit: number;
+  setGameLimit: (value: number) => void;
+  timeClass: "all" | "rapid" | "blitz" | "bullet" | "daily";
+  setTimeClass: (value: "all" | "rapid" | "blitz" | "bullet" | "daily") => void;
+  pgnText: string;
+  setPgnText: (value: string) => void;
+  loading: boolean;
+  runChessComConnect: () => void;
+  runChessComImport: () => void;
+  runPgnAnalysis: (text?: string, usernameOverride?: string) => void;
+  loadSample: () => void;
+  close: () => void;
+}) {
+  return (
+    <div className="profile-overlay" role="dialog" aria-modal="true">
+      <div className="profile-sheet">
+        <div className="sheet-header">
+          <div>
+            <span className="eyebrow">Profile</span>
+            <h2>Chess.com connection</h2>
+          </div>
+          <button className="icon-button sheet-close" onClick={close} aria-label="Close profile"><X size={18} /></button>
+        </div>
+
+        <div className="profile-status-card">
+          <div className={`profile-avatar-large ${username ? "connected" : ""}`}>{username ? username.slice(0, 2).toUpperCase() : <User size={22} />}</div>
+          <div>
+            <strong>{username || "No profile connected"}</strong>
+            <span>{username ? "Public game sync enabled" : "Enter a Chess.com username to start."}</span>
+          </div>
+        </div>
+
+        <section className="profile-form">
           <label>
-            <span>Username</span>
-            <input value={username} onChange={e => setUsername(e.target.value)} placeholder="hikaru" />
+            <span>Chess.com username</span>
+            <input value={username} onChange={event => setUsername(event.target.value)} placeholder="hikaru" />
           </label>
+          <button className="primary-button profile-sync" onClick={runChessComConnect} disabled={loading || !username.trim()}>
+            {loading ? <LoaderCircle className="spin" size={16} /> : <Link2 size={16} />} Connect instantly
+          </button>
+          <div className="profile-grid">
+            <label>
+              <span>Months</span>
+              <input type="number" min={1} max={240} value={months} onChange={event => setMonths(Number(event.target.value))} />
+            </label>
+            <label>
+              <span>Game cap</span>
+              <input type="number" min={25} max={50000} value={gameLimit} onChange={event => setGameLimit(Number(event.target.value))} />
+            </label>
+          </div>
           <label>
-            <span>Months</span>
-            <input type="number" min={1} max={36} value={months} onChange={e => setMonths(Number(e.target.value))} />
-          </label>
-          <label>
-            <span>Game cap</span>
-            <input type="number" min={25} max={5000} value={gameLimit} onChange={e => setGameLimit(Number(e.target.value))} />
-          </label>
-          <label>
-            <span>Time</span>
-            <select value={timeClass} onChange={e => setTimeClass(e.target.value as typeof timeClass)}>
-              <option value="all">All</option>
+            <span>Time control</span>
+            <select value={timeClass} onChange={event => setTimeClass(event.target.value as typeof timeClass)}>
+              <option value="all">All time controls</option>
               <option value="rapid">Rapid</option>
               <option value="blitz">Blitz</option>
               <option value="bullet">Bullet</option>
               <option value="daily">Daily</option>
             </select>
           </label>
-          <button className="primary-button" onClick={runChessComImport} disabled={loading || !username.trim()}>
-            {loading ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />} Import
+          <button className="ghost-button profile-sync" onClick={runChessComImport} disabled={loading || !username.trim()}>
+            {loading ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />} Sync {timeClass === "all" ? "Chess.com" : timeClass} games
           </button>
-          <label className="file-button">
-            <FileUp size={16} /> PGN
-            <input type="file" accept=".pgn,.txt" onChange={async e => {
-              const file = e.target.files?.[0];
-              if (!file) return;
-              const text = await file.text();
-              setPgnText(text);
-              runPgnAnalysis(text);
-            }} />
-          </label>
+          <button className="ghost-button profile-sync" onClick={() => {
+            localStorage.removeItem("pattern-coach-profile");
+            setUsername("");
+          }}>
+            Forget profile
+          </button>
         </section>
 
-        {progress && (
-          <div className="progress-rail">
-            <span style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%` }} />
-            <strong>{progress.label}</strong>
+        <details className="pgn-drawer">
+          <summary>PGN tools</summary>
+          <textarea value={pgnText} onChange={event => setPgnText(event.target.value)} placeholder="Paste PGN here..." />
+          <div className="button-row">
+            <button className="ghost-button" onClick={() => runPgnAnalysis()} disabled={!pgnText.trim()}><Target size={16} /> Analyze PGN</button>
+            <label className="file-button">
+              <FileUp size={16} /> Upload PGN
+              <input type="file" accept=".pgn,.txt" onChange={async event => {
+                const file = event.target.files?.[0];
+                if (!file) return;
+                if (file.size > 5 * 1024 * 1024) {
+                  alert("Please choose a PGN under 5 MB.");
+                  event.currentTarget.value = "";
+                  return;
+                }
+                const text = await file.text();
+                setPgnText(text);
+                runPgnAnalysis(text);
+              }} />
+            </label>
+            <button className="ghost-button" onClick={loadSample}>Load sample</button>
           </div>
-        )}
-
-        {error && <div className="error-banner">{error}</div>}
-
-        {!report ? (
-          <EmptyState
-            pgnText={pgnText} setPgnText={setPgnText}
-            runPgnAnalysis={runPgnAnalysis}
-            loadSample={() => { setUsername("You"); setPgnText(samplePgn); runPgnAnalysis(samplePgn); }}
-          />
-        ) : showDrills ? (
-          <DrillPanel issues={report.issues} onBack={() => setShowDrills(false)} />
-        ) : (
-          <Dashboard
-            report={report}
-            selectedIssue={selectedIssue}
-            setSelectedIssue={setSelectedIssue}
-            topPhase={topPhase}
-            boardHighlights={boardHighlights}
-          />
-        )}
-      </section>
-    </main>
+        </details>
+      </div>
+    </div>
   );
 }
 
-type WorkerPayload = { kind: "chesscom"; username: string; games: any[] } | { kind: "pgn"; username: string; pgnText: string };
-
-function analyzeGamesInWorker(payload: WorkerPayload) {
-  return new Promise<AnalysisReport>((resolve, reject) => {
-    const w = new Worker(new URL("./analysis/analyzer.worker.ts", import.meta.url), { type: "module" });
-    w.onmessage = (e: MessageEvent<{ ok: true; report: AnalysisReport } | { ok: false; error: string }>) => {
-      w.terminate(); if (e.data.ok) resolve(e.data.report); else reject(new Error(e.data.error));
-    };
-    w.onerror = e => { w.terminate(); reject(new Error(e.message || "Worker failed.")); };
-    w.postMessage(payload);
-  });
-}
-
-function EmptyState({ pgnText, setPgnText, runPgnAnalysis, loadSample }: {
-  pgnText: string; setPgnText: (t: string) => void; runPgnAnalysis: (t?: string) => void; loadSample: () => void;
-}) {
-  return (
-    <section className="empty-grid">
-      <div className="trainer-panel">
-        <div className="panel-heading"><Brain size={16} /><h2>Analyze your games</h2></div>
-        <textarea value={pgnText} onChange={e => setPgnText(e.target.value)} placeholder="Paste PGN here..." />
-        <div className="button-row">
-          <button className="primary-button" onClick={() => runPgnAnalysis()} disabled={!pgnText.trim()}>
-            <Target size={16} /> Analyze PGN
-          </button>
-          <button className="ghost-button" onClick={loadSample}>Load sample</button>
-        </div>
-      </div>
-      <div className="board-visual">
-        {Array.from({ length: 64 }).map((_, i) => (
-          <span key={i} className={(Math.floor(i / 8) + i) % 2 ? "dark" : "light"} />
-        ))}
-        <strong>♚</strong>
-      </div>
-    </section>
-  );
-}
-
-function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHighlights }: {
+function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHighlights, openQuality, trainNow, openAnalysis }: {
   report: AnalysisReport; selectedIssue: MoveIssue | null; setSelectedIssue: (i: MoveIssue) => void;
   topPhase: Phase; boardHighlights: Record<string, string>;
+  openQuality: (quality: MoveReviewQuality) => void;
+  trainNow: () => void;
+  openAnalysis: (fen?: string, flipped?: boolean, title?: string) => void;
 }) {
-  const { skillProfile, trainingPlan, moveQuality } = report;
+  const { skillProfile, moveQuality } = report;
+  const issueQueue = report.issues.slice().sort((a, b) => b.severity - a.severity).slice(0, 12);
+  const qualityCounts = {
+    blunder: report.moveReviews.filter(move => move.quality === "blunder").length,
+    miss: report.moveReviews.filter(move => move.quality === "miss").length,
+    mistake: report.moveReviews.filter(move => qualityBucket(move.quality) === "mistake").length,
+    best: report.moveReviews.filter(move => move.quality === "best").length,
+    good: report.moveReviews.filter(move => move.quality === "good").length,
+  };
 
   return (
-    <section className="dashboard">
-      {/* Metrics */}
-      <div className="metric-grid">
-        <Metric icon={<Crown size={16} />} label="Games" value={report.games.toString()} />
-        <Metric icon={<Swords size={16} />} label="Moves" value={report.moves.toString()} />
-        <Metric icon={<Target size={16} />} label="Patterns" value={report.issues.length.toString()} />
-        <Metric icon={<TrendingUp size={16} />} label="Est. rating" value={skillProfile.estimatedRating.toString()} />
+    <section className="dashboard mobile-screen">
+      <div className="dashboard-hero">
+        <div className="hero-copy">
+          <span className="eyebrow">Training command</span>
+          <h2>{report.summaries[0]?.title || "Performance Dashboard"}</h2>
+          <p>{report.summaries[0]?.advice || "Comprehensive summary of your recent games and identified patterns."}</p>
+          <button className="primary-button" onClick={trainNow}>Train Now <ChevronRight size={18} /></button>
+        </div>
+        <ChessBoard
+          fen={selectedIssue?.fenBefore}
+          flipped={selectedIssue?.color === "black"}
+          highlightSquares={boardHighlights}
+          onAnalyze={() => openAnalysis(selectedIssue?.fenBefore, selectedIssue?.color === "black", selectedIssue?.title)}
+          size={292}
+        />
       </div>
 
-      {/* Coach focus + Board */}
-      <section className="coach-grid">
-        <div className="trainer-panel priority-panel">
-          <div className="panel-heading"><Brain size={16} /><h2>Focus area</h2></div>
+      <div className="metric-grid">
+        <Metric icon={<Crown size={16} />} label="Games Analyzed" value={report.games.toString()} />
+        <Metric icon={<Swords size={16} />} label="Moves Checked" value={report.moves > 999 ? `${(report.moves / 1000).toFixed(1)}k` : report.moves.toString()} />
+        <Metric icon={<Target size={16} />} label="Patterns Found" value={report.issues.length.toString()} />
+        <Metric icon={<TrendingUp size={16} />} label="Est. Performance" value={skillProfile.estimatedRating.toString()} />
+      </div>
+
+      <section className="focus-card compact-focus">
+        <span className="critical-badge">Critical Focus Area</span>
+        <h3>{report.summaries[0]?.title || "Kingside Safety"}</h3>
+        <p>{report.summaries[0]?.advice || "This pattern has cost you significant evaluation in recent games."}</p>
+      </section>
+
+      <section>
+        <div className="skill-header"><Zap size={16} /><h2>Move Review</h2></div>
+        <div className="quality-card-grid">
+          <QualityReviewCard icon={<AlertTriangle size={18} />} label="Blunders" value={qualityCounts.blunder} tone="bad" onClick={() => openQuality("blunder")} />
+          <QualityReviewCard icon={<Target size={18} />} label="Misses" value={qualityCounts.miss} tone="miss" onClick={() => openQuality("miss")} />
+          <QualityReviewCard icon={<Shield size={18} />} label="Mistakes" value={qualityCounts.mistake} tone="warn" onClick={() => openQuality("mistake")} />
+          <QualityReviewCard icon={<Crown size={18} />} label="Best" value={qualityCounts.best} tone="good" onClick={() => openQuality("best")} />
+          <QualityReviewCard icon={<CheckCircle2 size={18} />} label="Good" value={qualityCounts.good} tone="neutral" onClick={() => openQuality("good")} />
+        </div>
+      </section>
+
+      <section className="skill-section">
+        <div className="skill-profile-card">
+          <div className="skill-header"><BarChart3 size={16} /><h2>Skill Profile</h2></div>
+          <div className="dimension-grid">
+            {(Object.entries(skillProfile.scores) as [SkillDimension, number][]).slice(0, 5).map(([dim, score]) => (
+              <div key={dim} className="dimension-row">
+                <span className="dimension-label">{dimensionLabels[dim]}</span>
+                <div className="dimension-bar">
+                  <div className={`dimension-fill ${score < 50 ? "danger" : score < 60 ? "warn" : ""}`} style={{ width: `${score}%` }} />
+                </div>
+                <span className="dimension-value">{score}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div className="skill-header"><Target size={16} /><h2>Recent Patterns Identified</h2></div>
+        <div className="pattern-list compact-patterns">
+          {report.summaries.map(s => (
+            <PatternCard key={s.id} summary={s} setSelectedIssue={setSelectedIssue} />
+          ))}
+        </div>
+      </section>
+
+      <section className="desktop-extra">
+        <div className="coach-grid">
+          <div className="trainer-panel priority-panel">
+            <div className="panel-heading"><Brain size={16} /><h2>Focus area</h2></div>
           {report.summaries[0] ? (
             <>
               <h3>{report.summaries[0].title}</h3>
@@ -251,112 +721,889 @@ function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHig
           ) : (
             <p>No recurring patterns found in this sample.</p>
           )}
-        </div>
-
-        <div className="trainer-panel board-panel">
-          <div className="panel-heading"><Target size={16} /><h2>Position lens</h2></div>
-          <div style={{ display: "flex", justifyContent: "center" }}>
-            <ChessBoard
-              fen={selectedIssue?.fenAfter || selectedIssue?.fenBefore}
-              flipped={selectedIssue?.color === "black"}
-              highlightSquares={boardHighlights}
-              size={420}
-            />
           </div>
-          {selectedIssue && (
-            <div className="position-caption">
-              <strong>{selectedIssue.moveNumber}. {selectedIssue.san}</strong>
-              <span>{selectedIssue.explanation}</span>
-            </div>
-          )}
-        </div>
-      </section>
-
-      {/* Skill Profile */}
-      <section className="skill-section">
-        <div className="skill-header"><BarChart3 size={16} /><h2>Skill profile</h2></div>
-        <div className="skill-profile-card">
-          <div className="skill-profile-header">
-            <div className="profile-left">
-              <h3>Your chess DNA</h3>
-              <p>{skillProfile.descriptions[skillProfile.strongest]}</p>
-            </div>
-            <div className="rating-display">
-              <div className="rating-number">{skillProfile.estimatedRating}</div>
-              <div className="rating-label">Estimated rating</div>
-            </div>
-          </div>
-
-          <div className="dimension-grid">
-            {(Object.entries(skillProfile.scores) as [SkillDimension, number][]).map(([dim, score]) => (
-              <div key={dim} className="dimension-row">
-                <span className="dimension-label">{dimensionLabels[dim]}</span>
-                <div className="dimension-bar">
-                  <div className="dimension-fill" style={{ width: `${score}%` }} />
-                </div>
-                <span className="dimension-value">{score}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Move Quality */}
-      <section>
-        <div className="skill-header"><Zap size={16} /><h2>Move quality distribution</h2></div>
-        <div className="quality-grid">
-          <QualityChip label="Blunders" value={moveQuality.blunders} />
-          <QualityChip label="Mistakes" value={moveQuality.mistakes} />
-          <QualityChip label="Inaccuracies" value={moveQuality.inaccuracies} />
-          <QualityChip label="Good" value={moveQuality.good} />
-          <QualityChip label="Excellent" value={moveQuality.excellent} />
-        </div>
-      </section>
-
-      {/* Pattern Cards */}
-      <section>
-        <div className="skill-header"><Target size={16} /><h2>Patterns</h2></div>
-        <div className="pattern-list">
-          {report.summaries.map(s => (
-            <PatternCard key={s.id} summary={s} setSelectedIssue={setSelectedIssue} />
-          ))}
-        </div>
-      </section>
-
-      {/* Training Plan */}
-      <section>
-        <div className="skill-header"><TrendingUp size={16} /><h2>Training plan</h2></div>
-        <div className="training-grid">
-          {trainingPlan.map(plan => (
-            <TrainingCard key={plan.dimension} plan={plan} />
-          ))}
-        </div>
-      </section>
-
-      {/* Game Table */}
-      <section className="trainer-panel">
-        <div className="panel-heading"><Activity size={16} /><h2>Games with training signal</h2></div>
-        <div className="game-table">
-          {report.gameSummaries.slice().sort((a, b) => b.issues - a.issues).slice(0, 8).map((g, i) => (
-            <a href={g.url} target="_blank" rel="noreferrer" className="game-row" key={`${g.url}-${i}`}>
-              <span>{g.opponent || "Unknown"}</span>
-              <span>{g.opening || "—"}</span>
-              <span>{g.color}</span>
-              <strong>{g.issues}</strong>
-            </a>
-          ))}
         </div>
       </section>
     </section>
   );
 }
 
-function Metric({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
-  return <div className="metric">{icon}<span>{label}</span><strong>{value}</strong></div>;
+function QualityReviewCard({ icon, label, value, tone, onClick }: {
+  icon: ReactNode;
+  label: string;
+  value: number;
+  tone: "bad" | "miss" | "warn" | "engine" | "good" | "neutral";
+  onClick: () => void;
+}) {
+  return (
+    <button className={`quality-review-card ${tone}`} onClick={onClick}>
+      {icon}
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </button>
+  );
 }
 
-function QualityChip({ label, value }: { label: string; value: number }) {
-  return <div className="quality-chip"><strong>{value}</strong><span>{label}</span></div>;
+function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId, setSelectedPatternId, selectedReviewId, setSelectedReviewId, startDrill, openAnalysis }: {
+  report: AnalysisReport;
+  selectedIssue: MoveIssue | null;
+  setSelectedIssue: (i: MoveIssue) => void;
+  selectedPatternId: string;
+  setSelectedPatternId: (id: string) => void;
+  selectedReviewId: string;
+  setSelectedReviewId: (id: string) => void;
+  startDrill: (quality: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
+  openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => void;
+}) {
+  const [qualityFilter, setQualityFilter] = useState<TrainableReviewBucket | "all">("all");
+  const [timeFilter, setTimeFilter] = useState<string>("all");
+  const [sortMode, setSortMode] = useState<"latest" | "severity">("latest");
+  const filterCounts = useMemo(() => {
+    const base = report.moveReviews
+      .filter(review => timeFilter === "all" || review.timeClass === timeFilter)
+      .filter(review => selectedPatternId === "all" || review.issueIds.includes(selectedPatternId as any))
+      .filter(review => review.issueIds.length && isTrainableQuality(review.quality));
+    return {
+      all: base.length,
+      blunder: base.filter(review => qualityBucket(review.quality) === "blunder").length,
+      miss: base.filter(review => qualityBucket(review.quality) === "miss").length,
+      mistake: base.filter(review => qualityBucket(review.quality) === "mistake").length,
+    };
+  }, [report.moveReviews, timeFilter, selectedPatternId]);
+  const reviews = useMemo(() => report.moveReviews
+      .filter(review => timeFilter === "all" || review.timeClass === timeFilter)
+      .filter(review => selectedPatternId === "all" || review.issueIds.includes(selectedPatternId as any))
+      .filter(review => qualityFilter === "all" || qualityBucket(review.quality) === qualityFilter)
+      .filter(review => review.issueIds.length && isTrainableQuality(review.quality))
+      .sort((a, b) => sortMode === "latest"
+        ? (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId) || (b.engineEvalLoss ?? b.severity) - (a.engineEvalLoss ?? a.severity)
+        : (b.engineEvalLoss ?? b.severity) - (a.engineEvalLoss ?? a.severity) || (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId))
+      .slice(0, 80),
+    [report.moveReviews, timeFilter, selectedPatternId, qualityFilter, sortMode]
+  );
+  const issueForReview = (review: MoveReview) =>
+    report.issues.find(issue => issue.fenBefore === review.fenBefore && issue.san === review.san);
+  const selectedReview = reviews.find(review => review.id === selectedReviewId);
+  const selectedReviewIssue = selectedReview ? issueForReview(selectedReview) : null;
+  const selectedIndex = selectedReview ? reviews.findIndex(review => review.id === selectedReview.id) : -1;
+
+  useEffect(() => {
+    if (!selectedReviewId || !reviews.some(review => review.id === selectedReviewId)) {
+      setSelectedReviewId("");
+    }
+  }, [reviews, selectedReviewId]);
+
+  useEffect(() => {
+    if (qualityFilter !== "all" && filterCounts[qualityFilter] === 0) {
+      setQualityFilter("all");
+    }
+  }, [filterCounts, qualityFilter]);
+
+  if (selectedReview && selectedReviewIssue) {
+    const selectedGame = report.gameSummaries.find(game => game.id === selectedReview.gameId);
+    return (
+      <MistakeDetail
+        review={selectedReview}
+        issue={selectedReviewIssue}
+        game={selectedGame}
+        back={() => setSelectedReviewId("")}
+        next={reviews[selectedIndex + 1] ? () => {
+          const nextReview = reviews[selectedIndex + 1];
+          const nextIssue = issueForReview(nextReview);
+          if (nextIssue) setSelectedIssue(nextIssue);
+          setSelectedReviewId(nextReview.id);
+        } : undefined}
+        prev={reviews[selectedIndex - 1] ? () => {
+          const previousReview = reviews[selectedIndex - 1];
+          const previousIssue = issueForReview(previousReview);
+          if (previousIssue) setSelectedIssue(previousIssue);
+          setSelectedReviewId(previousReview.id);
+        } : undefined}
+        train={() => startDrill(qualityBucket(selectedReview.quality), selectedReviewIssue.id, selectedReviewIssue)}
+        openAnalysis={openAnalysis}
+      />
+    );
+  }
+
+  return (
+    <section className="mistake-screen mobile-screen">
+      <div className="lab-filter-tabs">
+        {(["all", "blunder", "miss", "mistake"] as Array<TrainableReviewBucket | "all">).map(quality => (
+          <button
+            key={quality}
+            className={qualityFilter === quality ? "active" : ""}
+            onClick={() => setQualityFilter(quality)}
+            disabled={quality !== "all" && filterCounts[quality] === 0}
+          >
+            {quality === "all" ? "All" : qualityLabel(quality)}
+          </button>
+        ))}
+      </div>
+
+      <div className="lab-select-grid">
+        <label className="pattern-select">
+          <span>Time Control</span>
+          <select value={timeFilter} onChange={event => setTimeFilter(event.target.value)}>
+            <option value="all">All time controls</option>
+            <option value="rapid">Rapid</option>
+            <option value="blitz">Blitz</option>
+            <option value="bullet">Bullet</option>
+            <option value="daily">Daily</option>
+          </select>
+        </label>
+        <label className="pattern-select">
+          <span>Sort</span>
+          <select value={sortMode} onChange={event => setSortMode(event.target.value as "latest" | "severity")}>
+            <option value="latest">Latest games first</option>
+            <option value="severity">Biggest mistakes first</option>
+          </select>
+        </label>
+      </div>
+
+      <label className="pattern-select">
+        <span>Mistake Category</span>
+        <select value={selectedPatternId} onChange={event => setSelectedPatternId(event.target.value)}>
+          <option value="all">All recurring patterns</option>
+          {report.summaries.map(summary => (
+            <option key={summary.id} value={summary.id}>{summary.title} ({summary.total})</option>
+          ))}
+        </select>
+      </label>
+
+      <div className="mistake-card-list">
+        {reviews.map((review) => {
+          const issue = issueForReview(review);
+          const bucket = qualityBucket(review.quality);
+          return (
+          <button
+            key={review.id}
+            className={`mistake-big-card ${selectedIssue === issue ? "active" : ""}`}
+            onClick={() => {
+              if (issue) {
+                setSelectedIssue(issue);
+                setSelectedReviewId(review.id);
+              }
+            }}
+          >
+            <div className="mistake-card-body">
+              <div className="move-row">
+                <div className="move-copy">
+                  <strong>{review.moveNumber}. {review.san}</strong>
+                  <span className={`tag ${bucket}`}>{qualityLabel(review.quality)}</span>
+                </div>
+                <span className="eval-swing">{formatReviewSwing(review)}</span>
+              </div>
+              <p><Zap size={14} /> {review.phase} vs {review.opponent || "opponent"} <i /> {formatReviewDate(review)}</p>
+              <small>{reviewSwingCopy(review)}</small>
+            </div>
+          </button>
+        )})}
+      </div>
+
+      <button className="start-drill-button" onClick={() => startDrill(qualityFilter, selectedPatternId)}>
+        <Dumbbell size={25} /> Drill This Set
+      </button>
+    </section>
+  );
+}
+
+function MistakeDetail({ review, issue, game, back, next, prev, train, openAnalysis }: {
+  review: MoveReview;
+  issue: MoveIssue;
+  game?: GameSummary;
+  back: () => void;
+  next?: () => void;
+  prev?: () => void;
+  train: () => void;
+  openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => void;
+}) {
+  const { evaluatePosition } = useStockfish();
+  const [bestMove, setBestMove] = useState("");
+  const [engineLine, setEngineLine] = useState("");
+  const [sourceEval, setSourceEval] = useState<EngineEvaluation | null>(null);
+  const [boardEval, setBoardEval] = useState<EngineEvaluation | null>(null);
+  const [boardFen, setBoardFen] = useState(review.fenBefore);
+  const [lastMove, setLastMove] = useState<{ from: string; to: string } | undefined>();
+  const [storyStep, setStoryStep] = useState<"position" | "played" | "better">("position");
+
+  useEffect(() => {
+    let cancelled = false;
+    document.querySelector(".workspace")?.scrollTo({ top: 0, behavior: "auto" });
+    setBestMove("");
+    setEngineLine("");
+    setSourceEval(null);
+    setBoardEval(null);
+    setBoardFen(review.fenBefore);
+    setLastMove(undefined);
+    setStoryStep("position");
+    evaluatePosition(review.fenBefore, ENGINE_DEPTH).then(result => {
+      if (cancelled) return;
+      setSourceEval(result);
+      setBestMove(result.bestMove || review.engineBestMove || "");
+      setEngineLine(result.pv);
+    });
+    return () => { cancelled = true; };
+  }, [review.id, review.fenBefore, review.engineBestMove, evaluatePosition]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setBoardEval(null);
+    evaluatePosition(boardFen, ENGINE_DEPTH).then(result => {
+      if (!cancelled) setBoardEval(result);
+    });
+    return () => { cancelled = true; };
+  }, [boardFen, evaluatePosition]);
+
+  const showOriginal = () => {
+    setBoardFen(review.fenBefore);
+    setLastMove(undefined);
+    setStoryStep("position");
+  };
+
+  const showPlayedMove = () => {
+    setBoardFen(review.fenAfter);
+    setLastMove({ from: review.uci.slice(0, 2), to: review.uci.slice(2, 4) });
+    setStoryStep("played");
+  };
+
+  const showBetterMove = () => {
+    const move = sourceBestMove;
+    const board = new Chess(review.fenBefore);
+    const played = move && board.move({ from: move.slice(0, 2), to: move.slice(2, 4), promotion: move[4] || "q" });
+    setBoardFen(played ? board.fen() : review.fenBefore);
+    setLastMove(move ? { from: move.slice(0, 2), to: move.slice(2, 4) } : undefined);
+    setStoryStep("better");
+  };
+
+  const practiceHere = async () => {
+    train();
+  };
+
+  const bucket = qualityBucket(review.quality);
+  const sourceBestMove = sourceEval?.bestMove || bestMove || review.engineBestMove;
+
+  const storyArrows =
+    storyStep === "played"
+      ? [{ from: review.uci.slice(0, 2), to: review.uci.slice(2, 4), color: "rgba(230,79,79,0.72)" }]
+      : storyStep === "better" && sourceBestMove
+        ? [{ from: sourceBestMove.slice(0, 2), to: sourceBestMove.slice(2, 4), color: "rgba(183,226,107,0.82)" }]
+        : undefined;
+
+  return (
+    <section className="mistake-detail mobile-screen">
+      <div className="detail-topbar">
+        <button className="ghost-button" onClick={back}><ArrowLeft size={16} /> Back</button>
+        {prev && <button className="ghost-button" onClick={prev}>Prev</button>}
+        {next && <button className="ghost-button" onClick={next}>Next</button>}
+        <button className="primary-button" onClick={practiceHere}><Sword size={16} /> Train This Pattern</button>
+      </div>
+
+      <div className="detail-title">
+        <div className="detail-move-row">
+          <h2>{review.moveNumber}. {review.san}</h2>
+          <button className="move-analyze-button" onClick={() => openAnalysis(review.fenBefore, review.color === "black", `${review.moveNumber}. ${review.san}`, { gamePgn: game?.pgn })} aria-label="Analyze position">
+            <Search size={18} />
+          </button>
+        </div>
+        <span className={`tag ${bucket}`}>{qualityLabel(review.quality)}</span>
+        <p>{issue.title}</p>
+        <div className="detail-game-meta">
+          <span>Opponent: {review.opponent || "Unknown"}</span>
+          <span>{review.opening || "Unknown opening"}</span>
+        </div>
+      </div>
+
+      <div className="detail-board-card">
+        <div className="mistake-compare-strip">
+          <div className="played">
+            <span>You played</span>
+            <strong>{review.san}</strong>
+          </div>
+          <div className="better">
+            <span>Better</span>
+            <strong>{formatEngineUci(sourceBestMove) || "Calculating"}</strong>
+          </div>
+        </div>
+        <div className="mistake-board-story">
+          <button className={storyStep === "position" ? "active" : ""} onClick={showOriginal}>
+            <span>Position</span>
+            <strong>Before move</strong>
+          </button>
+          <button className={storyStep === "played" ? "active" : ""} onClick={showPlayedMove}>
+            <span>Your move</span>
+            <strong>{review.san}</strong>
+          </button>
+          <button className={storyStep === "better" ? "active" : ""} onClick={showBetterMove}>
+            <span>Better</span>
+            <strong>{formatEngineUci(sourceBestMove) || "..."}</strong>
+          </button>
+        </div>
+        <SlimEvalBar evaluation={boardEval} flipped={review.color === "black"} />
+        <ChessBoard
+          fen={boardFen}
+          flipped={review.color === "black"}
+          lastMove={lastMove}
+          arrows={storyArrows}
+          size={620}
+        />
+        {(sourceEval?.pv || engineLine) && <div className="mistake-line-preview">{(sourceEval?.pv || engineLine).split(" ").slice(0, 5).map(formatEngineUci).join(" ")}</div>}
+      </div>
+
+    </section>
+  );
+}
+
+function AnalysisView({ start, back }: {
+  start: AnalysisStart;
+  back: () => void;
+}) {
+  const [fen, setFen] = useState(start.fen);
+  const [lastMove, setLastMove] = useState<{ from: string; to: string } | undefined>();
+  const [engineEval, setEngineEval] = useState<EngineEvaluation | null>(null);
+  const [moveLog, setMoveLog] = useState<string[]>([]);
+  const [history, setHistory] = useState<AnalysisHistoryEntry[]>(() => buildAnalysisHistory(start));
+  const [historyIndex, setHistoryIndex] = useState(0);
+  const [boardFlipped, setBoardFlipped] = useState(Boolean(start.flipped));
+  const { ready, error, evaluatePosition } = useStockfish();
+
+  useEffect(() => {
+    const nextHistory = buildAnalysisHistory(start);
+    const nextIndex = findHistoryIndex(nextHistory, start.fen);
+    const entry = nextHistory[nextIndex] || { fen: start.fen };
+    setFen(entry.fen);
+    setLastMove(entry.lastMove);
+    setMoveLog(nextHistory.slice(1, nextIndex + 1).map(item => item.san).filter(Boolean) as string[]);
+    setHistory(nextHistory);
+    setHistoryIndex(nextIndex);
+    setEngineEval(null);
+    setBoardFlipped(Boolean(start.flipped));
+  }, [start]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setEngineEval(null);
+    evaluatePosition(fen, ENGINE_DEPTH).then(result => {
+      if (!cancelled) setEngineEval(result);
+    });
+    return () => { cancelled = true; };
+  }, [fen, evaluatePosition]);
+
+  const playMove = async (from: string, to: string, promotion?: string) => {
+    const board = new Chess(fen);
+    const move = board.move({ from, to, promotion: promotion || "q" });
+    if (!move) return;
+    setLastMove({ from, to });
+    setFen(board.fen());
+    const entry = { fen: board.fen(), lastMove: { from, to }, san: move.san };
+    setHistory(current => {
+      const next = current.slice(0, historyIndex + 1).concat(entry);
+      setHistoryIndex(next.length - 1);
+      setMoveLog(next.slice(1).map(item => item.san).filter(Boolean) as string[]);
+      return next;
+    });
+    const result = await evaluatePosition(board.fen(), ENGINE_DEPTH);
+    setEngineEval(result);
+  };
+
+  const jumpToHistory = (nextIndex: number) => {
+    const clamped = Math.max(0, Math.min(history.length - 1, nextIndex));
+    const entry = history[clamped];
+    setHistoryIndex(clamped);
+    setFen(entry.fen);
+    setLastMove(entry.lastMove);
+    setMoveLog(history.slice(1, clamped + 1).map(item => item.san).filter(Boolean) as string[]);
+  };
+
+  const resetAnalysis = () => {
+    const nextHistory = buildAnalysisHistory(start);
+    const entry = nextHistory[0] || { fen: start.fen };
+    setFen(entry.fen);
+    setMoveLog([]);
+    setLastMove(entry.lastMove);
+    setHistory(nextHistory);
+    setHistoryIndex(0);
+  };
+
+  return (
+    <section className="analysis-screen mobile-screen">
+      <div className="detail-topbar">
+        <button className="ghost-button" onClick={back}><ArrowLeft size={16} /> Back</button>
+      </div>
+      <div className="game-detail-head">
+        <span className="eyebrow">Analysis Board</span>
+        <h2>{start.title || "Explore the position"}</h2>
+        <p>Move pieces, reset, and compare ideas directly on the board.</p>
+      </div>
+      <div className="analysis-board-area">
+        <SlimEvalBar evaluation={engineEval} flipped={boardFlipped} />
+        <ChessBoard
+          fen={fen}
+          flipped={boardFlipped}
+          interactive
+          onMove={playMove}
+          lastMove={lastMove}
+          arrows={engineEval?.bestMove ? [{ from: engineEval.bestMove.slice(0, 2), to: engineEval.bestMove.slice(2, 4), color: "rgba(175,209,139,0.48)" }] : undefined}
+          showToolbar={false}
+          size={620}
+        />
+        <div className="analysis-board-controls" aria-label="Analysis board controls">
+          <button onClick={() => jumpToHistory(historyIndex - 1)} disabled={historyIndex <= 0} aria-label="Previous move"><ChevronLeft size={19} /></button>
+          <button onClick={resetAnalysis} aria-label="Reset analysis board"><RefreshCw size={18} /></button>
+          <button onClick={() => setBoardFlipped(value => !value)} aria-label="Flip board"><Repeat2 size={18} /></button>
+          <button onClick={() => jumpToHistory(historyIndex + 1)} disabled={historyIndex >= history.length - 1} aria-label="Next move"><ChevronRight size={19} /></button>
+        </div>
+        <EngineSuggestions evaluation={engineEval} ready={ready} error={error} />
+      </div>
+      <div className="analysis-move-log">
+        {moveLog.length ? moveLog.map((move, index) => <span key={`${move}-${index}`}>{index + 1}. {move}</span>) : <span>No moves played yet.</span>}
+      </div>
+    </section>
+  );
+}
+
+function SlimEvalBar({ evaluation, flipped = false }: { evaluation: EngineEvaluation | null; flipped?: boolean }) {
+  const whitePct = evalToWhitePercent(evaluation?.evalCp, evaluation?.mate);
+  const displayPct = flipped ? 100 - whitePct : whitePct;
+  const labels = evalEdgeLabels(evaluation?.evalCp, evaluation?.mate, flipped);
+  return (
+    <div className="slim-eval-bar" aria-label={`Evaluation ${formatEngineEval(evaluation?.evalCp, evaluation?.mate) || "calculating"}`}>
+      <span className={`eval-number ${labels.leftColor}`}>{labels.left}</span>
+      <div className="slim-eval-track">
+        <i style={{ width: `${displayPct}%` }} />
+      </div>
+      <span className={`eval-number ${labels.rightColor}`}>{labels.right}</span>
+    </div>
+  );
+}
+
+function EngineTopLine({ evaluation, ready, error }: { evaluation: EngineEvaluation | null; ready: boolean; error?: string }) {
+  const line = evaluation?.pv?.split(" ").slice(0, 5).map(formatEngineUci).join(" ");
+  const evalPercent = evalToWhitePercent(evaluation?.evalCp, evaluation?.mate);
+  return (
+    <div className="engine-top-line">
+      <div className="engine-top-header">
+        <span><i /> Engine Evaluation</span>
+        <strong>{formatEngineEval(evaluation?.evalCp, evaluation?.mate) || "..."}</strong>
+      </div>
+      <div className="engine-eval-meter" aria-label={`Evaluation ${formatEngineEval(evaluation?.evalCp, evaluation?.mate) || "calculating"}`}>
+        <span style={{ width: `${evalPercent}%` }} />
+      </div>
+      <p>{error || `${evaluation ? `d:${evaluation.depth || "..."} ` : ready ? "calculating " : "starting "}${line || "Engine line will appear here."}`}</p>
+    </div>
+  );
+}
+
+function EngineSuggestions({ evaluation, ready, error }: { evaluation: EngineEvaluation | null; ready: boolean; error?: string }) {
+  const lines = evaluation?.lines?.length
+    ? evaluation.lines
+    : evaluation?.pv
+      ? [{ multipv: 1, bestMove: evaluation.bestMove || evaluation.pv.split(" ")[0], evalCp: evaluation.evalCp, mate: evaluation.mate, pv: evaluation.pv, depth: evaluation.depth }]
+      : [];
+  return (
+    <div className="engine-suggestions" data-engine-error={error || ""}>
+      {lines.length ? lines.slice(0, 3).map(line => (
+        <div className="engine-suggestion" key={`${line.multipv}-${line.pv}`}>
+          <b>{formatEngineEval(line.evalCp, line.mate) || "..."}</b>
+          <strong>{formatPrincipalVariation(line.pv, line.bestMove)}</strong>
+          <span>d:{line.depth || "..."}</span>
+        </div>
+      )) : (
+        <div className="engine-suggestion muted">
+          <b>...</b>
+          <strong>{error ? "Offline" : ready ? "Thinking" : "Booting"}</strong>
+          <span>d:...</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatPrincipalVariation(pv?: string, fallback?: string) {
+  const moves = (pv || fallback || "").split(" ").filter(Boolean).slice(0, 5);
+  if (!moves.length) return "...";
+  return moves.map((move, index) => `${index === 0 ? "1. " : ""}${formatEngineUci(move)}`).join(" ");
+}
+
+function evalToWhitePercent(evalCp?: number, mate?: number) {
+  if (typeof mate === "number") return mate > 0 ? 96 : 4;
+  if (typeof evalCp !== "number") return 50;
+  return Math.max(4, Math.min(96, 50 + evalCp / 18));
+}
+
+function evalEdgeLabels(evalCp?: number, mate?: number, flipped = false) {
+  const whiteValue = formatEngineEval(evalCp, mate);
+  const blackValue = formatSideEval("black", evalCp, mate);
+  const side = evalAdvantageSide(evalCp, mate);
+  const leftColor = flipped ? "white" : "black";
+  const rightColor = flipped ? "black" : "white";
+  const labelFor = (color: "white" | "black") => {
+    if (!whiteValue || side === "equal") return whiteValue || "...";
+    if (side === color) return color === "white" ? whiteValue : blackValue;
+    return "";
+  };
+  return {
+    leftColor,
+    rightColor,
+    left: labelFor(leftColor),
+    right: labelFor(rightColor),
+  };
+}
+
+function evalAdvantageSide(evalCp?: number, mate?: number): "white" | "black" | "equal" {
+  if (typeof mate === "number") return mate > 0 ? "white" : "black";
+  if (typeof evalCp !== "number" || Math.abs(evalCp) < 1) return "equal";
+  return evalCp > 0 ? "white" : "black";
+}
+
+function formatSideEval(side: "white" | "black", evalCp?: number, mate?: number) {
+  if (side === "white") return formatEngineEval(evalCp, mate);
+  if (typeof mate === "number") return mate < 0 ? `M${Math.abs(mate)}` : `-M${mate}`;
+  if (typeof evalCp !== "number") return "";
+  return formatEngineEval(-evalCp);
+}
+
+type AnalysisHistoryEntry = {
+  fen: string;
+  lastMove?: { from: string; to: string };
+  san?: string;
+};
+
+function buildAnalysisHistory(start: AnalysisStart): AnalysisHistoryEntry[] {
+  if (!start.gamePgn) return [{ fen: start.fen }];
+  try {
+    const source = new Chess();
+    source.loadPgn(start.gamePgn);
+    const moves = source.history({ verbose: true });
+    const replay = new Chess();
+    const entries: AnalysisHistoryEntry[] = [{ fen: replay.fen() }];
+    for (const move of moves) {
+      const played = replay.move({ from: move.from, to: move.to, promotion: move.promotion || "q" });
+      if (!played) break;
+      entries.push({
+        fen: replay.fen(),
+        lastMove: { from: move.from, to: move.to },
+        san: move.san,
+      });
+    }
+    return entries.length ? entries : [{ fen: start.fen }];
+  } catch {
+    return [{ fen: start.fen }];
+  }
+}
+
+function findHistoryIndex(history: AnalysisHistoryEntry[], fen: string) {
+  const target = comparableFen(fen);
+  const index = history.findIndex(entry => comparableFen(entry.fen) === target);
+  return index >= 0 ? index : 0;
+}
+
+function comparableFen(fen: string) {
+  return fen.split(" ").slice(0, 4).join(" ");
+}
+
+function qualityLabel(quality: MoveReviewQuality) {
+  return quality === "best" ? "Best" :
+    quality === "good" ? "Good" :
+    quality === "blunder" ? "Blunder" :
+    quality === "miss" ? "Miss" :
+    "Mistake";
+}
+
+function qualityBucket(quality: MoveReviewQuality): ReviewBucket {
+  return quality === "inaccuracy" ? "mistake" : quality;
+}
+
+function isTrainableQuality(quality: MoveReviewQuality) {
+  return qualityBucket(quality) === "blunder" || qualityBucket(quality) === "miss" || qualityBucket(quality) === "mistake";
+}
+
+function reviewLossCp(review: MoveReview) {
+  if (typeof review.engineEvalBefore === "number" && typeof review.engineEvalAfter === "number") {
+    const playerSign = review.color === "white" ? 1 : -1;
+    return Math.max(0, (review.engineEvalBefore - review.engineEvalAfter) * playerSign);
+  }
+  return Math.max(0, review.engineEvalLoss ?? review.severity * 45);
+}
+
+function formatReviewSwing(review: MoveReview) {
+  const loss = reviewLossCp(review);
+  return formatEngineEvalLoss(loss);
+}
+
+function formatEngineEvalLoss(lossCp: number) {
+  const pawns = Math.max(0.1, Math.abs(lossCp) / 100);
+  return `-${pawns.toFixed(pawns >= 10 ? 0 : 1)}`;
+}
+
+function reviewSwingCopy(review: MoveReview) {
+  const better = review.engineBestMove ? formatEngineUci(review.engineBestMove) : "the engine move";
+  return `${better} was preferred. Eval swing ${formatReviewSwing(review)}.`;
+}
+
+function refineReviewWithEngine(
+  review: MoveReview,
+  engine: MoveEngineResult,
+): MoveReview {
+  const loss = engine.evalLossCp;
+  const missedTactic = review.issueIds.includes("missedForcingMove" as any);
+  const playerColor = review.color === "black" ? "b" : "w";
+  const nextQuality = classifyMoveQuality({
+    bestMove: engine.bestMove,
+    playedMove: engine.playedMove,
+    evalLossCp: loss,
+    evalBefore: engine.evalBefore,
+    evalAfter: engine.evalAfter,
+    playerColor,
+    missedForcingMove: missedTactic,
+    confidence: engine.confidence,
+  });
+  const isEngineMistake = ["blunder", "miss", "mistake", "inaccuracy"].includes(nextQuality);
+
+  return {
+    ...review,
+    quality: nextQuality,
+    severity: loss > 250 ? 9 : loss > 120 ? 6 : loss > 50 ? 3 : Math.min(review.severity, 1),
+    issueIds: isEngineMistake && !review.issueIds.length ? ["twoMoveBlindspot" as any] : review.issueIds,
+    title: isEngineMistake && !review.issueIds.length ? "Engine mistake" : review.title,
+    explanation: isEngineMistake
+      ? `${formatEngineUci(engine.bestMove) || "The engine move"} was preferred. Eval swing ${formatEngineEvalLoss(loss)}.`
+      : review.explanation,
+    engineBestMove: engine.bestMove,
+    engineEvalBefore: engine.evalBefore.cp,
+    engineEvalAfter: engine.evalAfter.cp,
+    engineEvalLoss: loss,
+    engineDepth: engine.depth,
+    engineConfidence: engine.confidence,
+    engineLines: engine.multipv,
+    engineReviewed: true,
+  };
+}
+
+function addEngineIssues(existingIssues: MoveIssue[], updates: Map<string, MoveReview>) {
+  const issues = existingIssues.slice();
+  for (const review of updates.values()) {
+    if (!isTrainableQuality(review.quality)) continue;
+    if (issues.some(issue => issue.fenBefore === review.fenBefore && issue.san === review.san)) continue;
+    issues.push({
+      id: "twoMoveBlindspot",
+      phase: review.phase,
+      quality: review.quality,
+      severity: review.severity,
+      title: review.title || "Engine mistake",
+      explanation: review.explanation,
+      advice: "Compare your move with the engine line, then drill the same pattern until the candidate move is automatic.",
+      moveNumber: review.moveNumber,
+      san: review.san,
+      uci: review.uci,
+      materialGain: review.materialGain,
+      fenBefore: review.fenBefore,
+      fenAfter: review.fenAfter,
+      gameUrl: review.gameUrl,
+      opponent: review.opponent,
+      color: review.color,
+      opening: review.opening,
+    });
+  }
+  return issues;
+}
+
+function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAnalysis }: {
+  report: AnalysisReport;
+  selectedGameId: number;
+  setSelectedGameId: (id: number) => void;
+  openMove: (review: MoveReview) => void;
+  openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => void;
+}) {
+  const [timeFilter, setTimeFilter] = useState("all");
+  const sortedGames = useMemo(
+    () => report.gameSummaries
+      .filter(game => timeFilter === "all" || game.timeClass === timeFilter)
+      .slice()
+      .sort((a, b) => (b.endTime ?? b.id) - (a.endTime ?? a.id)),
+    [report.gameSummaries, timeFilter]
+  );
+  const game = sortedGames.find(candidate => candidate.id === selectedGameId);
+  const reviews = useMemo(() => report.moveReviews.filter(review => review.gameId === game?.id), [report.moveReviews, game?.id]);
+  const [selectedReviewId, setSelectedReviewId] = useState(reviews[0]?.id || "");
+  const selectedReview = reviews.find(review => review.id === selectedReviewId) || reviews[0];
+  const [playFen, setPlayFen] = useState(selectedReview?.fenBefore || "");
+  const [lastEngineMove, setLastEngineMove] = useState("");
+  const [boardEval, setBoardEval] = useState<EngineEvaluation | null>(null);
+  const [autoReply, setAutoReply] = useState(false);
+  const { ready, error, evaluatePosition } = useStockfish();
+
+  useEffect(() => {
+    setSelectedReviewId(reviews[0]?.id || "");
+    setPlayFen(reviews[0]?.fenBefore || "");
+    setLastEngineMove("");
+    setBoardEval(null);
+  }, [selectedGameId, reviews]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fen = playFen || selectedReview?.fenBefore;
+    if (!fen) return;
+    setBoardEval(null);
+    evaluatePosition(fen, ENGINE_DEPTH).then(result => {
+      if (cancelled) return;
+      setBoardEval(result);
+    });
+    return () => { cancelled = true; };
+  }, [playFen, selectedReview?.fenBefore, evaluatePosition]);
+
+  const playMove = async (from: string, to: string, promotion?: string) => {
+    const board = new Chess(playFen || selectedReview?.fenBefore);
+    const move = board.move({ from, to, promotion: promotion || "q" });
+    if (!move) return;
+    const afterUser = board.fen();
+    setPlayFen(afterUser);
+    const engine = await evaluatePosition(afterUser, ENGINE_DEPTH);
+    setBoardEval(engine);
+    setLastEngineMove(engine.bestMove);
+    if (autoReply && engine.bestMove) {
+      const response = new Chess(afterUser);
+      const reply = response.move({ from: engine.bestMove.slice(0, 2), to: engine.bestMove.slice(2, 4), promotion: engine.bestMove[4] || "q" });
+      if (reply) setPlayFen(response.fen());
+    }
+  };
+
+  const qualityCountsForGame = (id: number) => {
+    const gameReviews = report.moveReviews.filter(review => review.gameId === id);
+    return {
+      critical: gameReviews.filter(review => ["blunder", "miss", "mistake"].includes(review.quality)).length,
+      reviewed: gameReviews.length,
+    };
+  };
+
+  if (!game) {
+    return (
+      <section className="games-screen mobile-screen">
+      <div className="screen-intro">
+        <h2>Games</h2>
+        <p>Browse your played games. Open one when you want the board, engine lines, and move review.</p>
+      </div>
+
+      <label className="pattern-select">
+        <span>Time Control</span>
+        <select value={timeFilter} onChange={event => setTimeFilter(event.target.value)}>
+          <option value="all">All time controls</option>
+          <option value="rapid">Rapid</option>
+          <option value="blitz">Blitz</option>
+          <option value="bullet">Bullet</option>
+          <option value="daily">Daily</option>
+        </select>
+      </label>
+
+      <div className="game-library-list">
+        {sortedGames.map(summary => (
+          <button key={summary.id} onClick={() => setSelectedGameId(summary.id)}>
+            <div>
+              <strong>{summary.opponent || "Unknown opponent"}</strong>
+              <span>{[summary.timeClass, summary.opening || summary.result].filter(Boolean).join(" • ") || "Game review"}</span>
+            </div>
+            <b>{qualityCountsForGame(summary.id).critical}</b>
+            <small>{summary.endTime ? new Date(summary.endTime * 1000).toLocaleDateString() : "PGN"}</small>
+          </button>
+        ))}
+      </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="games-screen mobile-screen">
+      <div className="detail-topbar">
+        <button className="ghost-button" onClick={() => setSelectedGameId(-1)}><ArrowLeft size={16} /> Games</button>
+        <button className="ghost-button" onClick={() => selectedReview && openMove(selectedReview)} disabled={!selectedReview}>Open move</button>
+        <button className={`ghost-button ${autoReply ? "active" : ""}`} onClick={() => setAutoReply(value => !value)}>
+          {autoReply ? "Engine replies on" : "Free explore"}
+        </button>
+      </div>
+
+      <div className="game-detail-head">
+        <h2>{game.opponent || "Unknown opponent"}</h2>
+        <p>{[game.timeClass, game.opening || game.result].filter(Boolean).join(" • ")}</p>
+        <div className="detail-game-meta">
+          <span>{game.issues} flagged</span>
+          <span>{reviews.length} reviewed moves</span>
+          {game.endTime && <span>{new Date(game.endTime * 1000).toLocaleDateString()}</span>}
+        </div>
+      </div>
+
+      <div className="game-review-board">
+        <ChessBoard
+          fen={playFen || selectedReview?.fenBefore}
+          flipped={game.color === "black"}
+          interactive
+          onMove={playMove}
+          onGestureBack={() => {
+            const currentIndex = reviews.findIndex(review => review.id === selectedReview?.id);
+            const previous = reviews[Math.max(0, currentIndex - 1)];
+            if (previous) {
+              setSelectedReviewId(previous.id);
+              setPlayFen(previous.fenBefore);
+              setLastEngineMove("");
+            }
+          }}
+          onGestureForward={() => {
+            const currentIndex = reviews.findIndex(review => review.id === selectedReview?.id);
+            const next = reviews[Math.min(reviews.length - 1, currentIndex + 1)];
+            if (next) {
+              setSelectedReviewId(next.id);
+              setPlayFen(next.fenBefore);
+              setLastEngineMove("");
+            }
+          }}
+          lastMove={lastEngineMove ? { from: lastEngineMove.slice(0, 2), to: lastEngineMove.slice(2, 4) } : undefined}
+          onAnalyze={() => openAnalysis(playFen || selectedReview?.fenBefore, game.color === "black", game.opponent || "Game analysis", { gamePgn: game.pgn })}
+          size={340}
+        />
+        <EngineReadout evaluation={boardEval} ready={ready} error={error} flipped={game.color === "black"} />
+      </div>
+
+      {selectedReview && (
+        <div className="selected-move-panel">
+          <div><span>You played</span><strong>{selectedReview.san}</strong></div>
+          <div><span>Engine suggests</span><strong>{formatEngineUci(boardEval?.bestMove) || "Calculating..."}</strong></div>
+          <div><span>Evaluation</span><strong>{formatEngineEval(boardEval?.evalCp, boardEval?.mate) || "Calculating..."}</strong></div>
+          <p>{selectedReview.explanation}</p>
+          {boardEval?.pv && <small>Line: {boardEval.pv.split(" ").slice(0, 8).map(formatEngineUci).join(" ")}</small>}
+        </div>
+      )}
+
+      <div className="move-review-list">
+        {reviews.map(review => (
+          <button
+            key={review.id}
+            className={review.id === selectedReview?.id ? "active" : ""}
+            onClick={() => {
+              setSelectedReviewId(review.id);
+              setPlayFen(review.fenBefore);
+              setLastEngineMove("");
+            }}
+            onDoubleClick={() => openMove(review)}
+          >
+            <span>{review.moveNumber}. {review.san}</span>
+            <small className={qualityBucket(review.quality)}>{qualityLabel(review.quality)}</small>
+            <p>{review.explanation}</p>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function formatReviewDate(review: MoveReview) {
+  if (!review.endTime) return "PGN game";
+  return new Date(review.endTime * 1000).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function Metric({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
+  return <div className="metric">{icon}<span>{label}</span><strong>{value}</strong></div>;
 }
 
 function PatternCard({ summary, setSelectedIssue }: { summary: PatternSummary; setSelectedIssue: (i: MoveIssue) => void }) {
@@ -391,22 +1638,6 @@ function PhaseBars({ summary }: { summary: PatternSummary }) {
           <strong>{summary.phases[p]}</strong>
         </div>
       ))}
-    </div>
-  );
-}
-
-function TrainingCard({ plan }: { plan: TrainingRecommendation }) {
-  return (
-    <div className="training-card">
-      <h4>
-        {dimensionLabels[plan.dimension]}
-        <span className="priority-badge">Priority {plan.priority}</span>
-      </h4>
-      <p>{plan.focus}</p>
-      <ul>
-        {plan.exercises.map((ex, i) => <li key={i}>{ex}</li>)}
-      </ul>
-      <div className="gain-text">{plan.expectedGain}</div>
     </div>
   );
 }

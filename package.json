@@ -4,26 +4,29 @@
   "description": "",
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/sync-stockfish-assets.mjs",
+    "sync:engine": "node scripts/sync-stockfish-assets.mjs",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "chess.js": "^1.4.0",
-    "chessboard-element": "^1.2.0",
     "lucide-react": "^1.14.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "stockfish.js": "^10.0.2"
+    "stockfish": "^18.0.7"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.7.0",
     "typescript": "^5.9.3",
-    "vite": "^5.4.21"
+    "vite": "^5.4.21",
+    "vitest": "^2.1.9"
   }
 }

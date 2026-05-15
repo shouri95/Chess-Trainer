@@ -11,12 +11,15 @@ type PatternId =
 type MoveIssue = {
   id: PatternId;
   phase: Phase;
+  quality: MoveReviewQuality;
   severity: number;
   title: string;
   explanation: string;
   advice: string;
   moveNumber: number;
   san: string;
+  uci: string;
+  materialGain: number;
   fenBefore: string;
   fenAfter: string;
   gameUrl?: string;
@@ -36,6 +39,7 @@ type PatternSummary = {
 };
 
 type GameSummary = {
+  id: number;
   url?: string;
   opponent: string;
   color: "white" | "black";
@@ -43,6 +47,49 @@ type GameSummary = {
   moveCount: number;
   issues: number;
   opening?: string;
+  endTime?: number;
+  timeClass?: string;
+  pgn: string;
+};
+
+export type MoveReviewQuality = "blunder" | "miss" | "mistake" | "inaccuracy" | "good" | "best";
+
+export type MoveReview = {
+  id: string;
+  gameId: number;
+  gameUrl?: string;
+  opponent?: string;
+  opening?: string;
+  endTime?: number;
+  timeClass?: string;
+  phase: Phase;
+  moveNumber: number;
+  san: string;
+  uci: string;
+  color: "white" | "black";
+  quality: MoveReviewQuality;
+  severity: number;
+  engineBestMove?: string;
+  engineEvalBefore?: number;
+  engineEvalAfter?: number;
+  engineEvalLoss?: number;
+  engineDepth?: number;
+  engineConfidence?: "book" | "high" | "medium" | "low" | "timeout" | "failed";
+  engineReviewed?: boolean;
+  engineLines?: Array<{
+    multipv: number;
+    bestMove: string;
+    evalCp?: number;
+    mate?: number;
+    pv: string;
+    depth: number;
+  }>;
+  fenBefore: string;
+  fenAfter: string;
+  issueIds: PatternId[];
+  title: string;
+  explanation: string;
+  materialGain: number;
 };
 
 export type SkillDimension =
@@ -74,6 +121,7 @@ export type TrainingRecommendation = {
 
 export type MoveQualityDistribution = {
   blunders: number;
+  misses: number;
   mistakes: number;
   inaccuracies: number;
   good: number;
@@ -88,6 +136,7 @@ export type AnalysisReport = {
   summaries: PatternSummary[];
   phaseTotals: Record<Phase, number>;
   gameSummaries: GameSummary[];
+  moveReviews: MoveReview[];
   skillProfile: SkillProfile;
   trainingPlan: TrainingRecommendation[];
   moveQuality: MoveQualityDistribution;
@@ -103,7 +152,11 @@ type ParsedGame = {
   black?: string;
   whiteResult?: string;
   blackResult?: string;
+  whiteRating?: number;
+  blackRating?: number;
   opening?: string;
+  endTime?: number;
+  timeClass?: string;
 };
 
 type VerboseMove = Move;
@@ -142,7 +195,10 @@ export function analyzeChessComGames(username: string, games: ChessComGame[]): A
     pgn: game.pgn, url: game.url,
     white: game.white.username, black: game.black.username,
     whiteResult: game.white.result, blackResult: game.black.result,
-    opening: openingFromGame(game.eco, game.pgn)
+    whiteRating: game.white.rating, blackRating: game.black.rating,
+    opening: openingFromGame(game.eco, game.pgn),
+    endTime: game.end_time,
+    timeClass: game.time_class
   })));
 }
 
@@ -156,6 +212,7 @@ export function analyzePgnText(username: string, pgnText: string): AnalysisRepor
 function analyzeParsedGames(username: string, games: ParsedGame[]): AnalysisReport {
   const normalizedUser = username.trim().toLowerCase();
   const issues: MoveIssue[] = [];
+  const moveReviews: MoveReview[] = [];
   const gameSummaries: GameSummary[] = [];
   let playerMoves = 0;
 
@@ -175,10 +232,10 @@ function analyzeParsedGames(username: string, games: ParsedGame[]): AnalysisRepo
   let totalExcellent = 0;
   let wins = 0;
   let losses = 0;
-  let highestRating = 0;
   let peakRating = 0;
+  let ratingSamples = 0;
 
-  for (const game of games) {
+  for (const [gameId, game] of games.entries()) {
     const chess = new Chess();
     try { chess.loadPgn(game.pgn, { strict: false }); } catch { continue; }
 
@@ -193,12 +250,13 @@ function analyzeParsedGames(username: string, games: ParsedGame[]): AnalysisRepo
     const color: Color = playerIsBlack ? "b" : "w";
     const colorName: "white" | "black" = color === "w" ? "white" : "black";
     const opponent = color === "w" ? black : white;
-    const prevIssueCount = issues.length;
+    const gameIssueMoveKeys = new Set<string>();
 
-    // Track ratings if available
-    const rating = playerIsWhite
-      ? (game.whiteResult?.includes("rated") ? 0 : 0)
-      : 0;
+    const rating = playerIsWhite ? game.whiteRating : game.blackRating;
+    if (typeof rating === "number" && Number.isFinite(rating) && rating > 0) {
+      peakRating = Math.max(peakRating, rating);
+      ratingSamples += 1;
+    }
 
     history.forEach((move, index) => {
       if (move.color !== color) return;
@@ -208,34 +266,65 @@ function analyzeParsedGames(username: string, games: ParsedGame[]): AnalysisRepo
         move, nextMove: history[index + 1], ply: index + 1,
         phase: getPhase(move.after, index + 1), color, game, opponent, mode: "deep"
       });
+      const reviewQuality: MoveReviewQuality = result.quality === "excellent" ? "best" : result.quality;
+      result.issues.forEach(issue => { issue.quality = reviewQuality; });
 
       issues.push(...result.issues);
+      if (result.issues.length) {
+        gameIssueMoveKeys.add(`${move.before}|${move.from}${move.to}${move.promotion || ""}`);
+      }
+      moveReviews.push(reviewFromMove({
+        move,
+        result,
+        gameId,
+        game,
+        opponent,
+        colorName,
+        phase: getPhase(move.after, index + 1),
+      }));
 
-      // Accumulate dimension scores
-      result.dimensions.forEach(d => { dimCounts[d]++; });
+      // Accumulate dimension scores against relevant opportunity sets instead
+      // of crediting every quiet move as a success in every chess skill.
+      new Set(result.dimensions).forEach(d => { dimCounts[d]++; });
       const phase = getPhase(move.after, index + 1);
-      // Map phase to dimensions
+      const beforePosition = new Chess(move.before);
+      const afterPosition = new Chess(move.after);
+      const tacticalOpportunity = hasForcingOpportunity(beforePosition, color) || Boolean(move.captured) || move.san.includes("+") || move.san.includes("#");
+      const positionalOpportunity = !tacticalOpportunity && phase !== "opening";
+      const kingSafetyOpportunity = phase === "opening" || isKingSafetyMove(move, beforePosition, afterPosition, color);
+      const coordinationOpportunity = piecesOf(beforePosition, color).filter(piece => piece.type !== "k" && piece.type !== "p").length >= 3;
+      const conversionOpportunity = materialScore(beforePosition, color) >= 2 && phase !== "opening";
+
       if (phase === "opening") dimTotals.opening++;
       if (phase === "endgame") dimTotals.endgame++;
-      dimTotals.positional++;
-      dimTotals.tactical++;
+      if (tacticalOpportunity) dimTotals.tactical++;
+      if (positionalOpportunity) dimTotals.positional++;
+      dimTotals.blunderControl++;
+      if (kingSafetyOpportunity) dimTotals.kingSafety++;
+      if (coordinationOpportunity) dimTotals.coordination++;
+      if (conversionOpportunity) dimTotals.conversion++;
 
       // Move quality tracking
-      if (result.quality === "blunder") { totalBlunders++; dimTotals.blunderControl++; }
-      else if (result.quality === "mistake") { totalMistakes++; dimTotals.blunderControl++; }
+      if (result.quality === "blunder") totalBlunders++;
+      else if (result.quality === "miss") totalMistakes++;
+      else if (result.quality === "mistake") totalMistakes++;
       else if (result.quality === "inaccuracy") totalInaccuracies++;
       else if (result.quality === "excellent") totalExcellent++;
-      else { totalGoodMoves++; dimTotals.coordination++; }
+      else totalGoodMoves++;
     });
 
     const result = resultForColor(color, game, headers.Result);
     if (result === "win") wins++; else if (result === "loss") losses++;
 
     gameSummaries.push({
+      id: gameId,
       url: game.url, opponent, color: colorName, result,
       moveCount: history.filter(m => m.color === color).length,
-      issues: issues.length - prevIssueCount,
-      opening: game.opening
+      issues: gameIssueMoveKeys.size,
+      opening: game.opening,
+      endTime: game.endTime,
+      timeClass: game.timeClass,
+      pgn: game.pgn
     });
   }
 
@@ -255,9 +344,9 @@ function analyzeParsedGames(username: string, games: ParsedGame[]): AnalysisRepo
     opening: computeScore(dimTotals.opening - dimCounts.opening, dimTotals.opening),
     endgame: computeScore(dimTotals.endgame - dimCounts.endgame, dimTotals.endgame),
     blunderControl: computeScore(totalGameMoves - totalBlunders - totalMistakes, totalGameMoves),
-    kingSafety: computeScore(dimTotals.tactical - dimCounts.kingSafety, dimTotals.tactical || 1),
+    kingSafety: computeScore(dimTotals.kingSafety - dimCounts.kingSafety, dimTotals.kingSafety),
     coordination: computeScore(totalGoodMoves + totalExcellent, totalGameMoves),
-    conversion: computeScore(wins, wins + losses || 1),
+    conversion: computeScore(dimTotals.conversion - dimCounts.conversion, dimTotals.conversion),
   };
 
   // Estimate rating (very rough heuristic based on move quality)
@@ -280,6 +369,9 @@ function analyzeParsedGames(username: string, games: ParsedGame[]): AnalysisRepo
   else if (winRate > 0.55) estRating += 50;
   else if (winRate < 0.35) estRating -= 100;
   else if (winRate < 0.45) estRating -= 30;
+  if (ratingSamples) {
+    estRating = Math.round(peakRating * 0.7 + estRating * 0.3);
+  }
 
   // Find strongest and weakest dimensions
   let strongest: SkillDimension = "tactical";
@@ -317,6 +409,7 @@ function analyzeParsedGames(username: string, games: ParsedGame[]): AnalysisRepo
       endgame: issues.filter(i => i.phase === "endgame").length,
     },
     gameSummaries,
+    moveReviews,
     skillProfile: {
       scores: skillScores,
       estimatedRating: estRating,
@@ -328,6 +421,7 @@ function analyzeParsedGames(username: string, games: ParsedGame[]): AnalysisRepo
     trainingPlan,
     moveQuality: {
       blunders: totalBlunders,
+      misses: moveReviews.filter(move => move.quality === "miss").length,
       mistakes: totalMistakes,
       inaccuracies: totalInaccuracies,
       good: totalGoodMoves,
@@ -374,8 +468,61 @@ function generateTrainingPlan(scores: Record<SkillDimension, number>, issues: Mo
 type MoveAnalysisResult = {
   issues: MoveIssue[];
   dimensions: SkillDimension[];
-  quality: "blunder" | "mistake" | "inaccuracy" | "good" | "excellent";
+  quality: "blunder" | "miss" | "mistake" | "inaccuracy" | "good" | "excellent";
 };
+
+function reviewFromMove({
+  move,
+  result,
+  gameId,
+  game,
+  opponent,
+  colorName,
+  phase,
+}: {
+  move: VerboseMove;
+  result: MoveAnalysisResult;
+  gameId: number;
+  game: ParsedGame;
+  opponent: string;
+  colorName: "white" | "black";
+  phase: Phase;
+}): MoveReview {
+  const before = new Chess(move.before);
+  const after = new Chess(move.after);
+  const materialGain = materialScore(after, move.color) - materialScore(before, move.color);
+  const primaryIssue = result.issues.slice().sort((a, b) => b.severity - a.severity)[0];
+  const quality: MoveReviewQuality =
+    result.quality === "excellent" ? "best" :
+    result.quality;
+
+  return {
+    id: `${gameId}-${move.before.split(" ")[5]}-${move.from}${move.to}${move.promotion || ""}`,
+    gameId,
+    gameUrl: game.url,
+    opponent,
+    opening: game.opening,
+    endTime: game.endTime,
+    timeClass: game.timeClass,
+    phase,
+    moveNumber: getMoveNumber(move.before),
+    san: move.san,
+    uci: `${move.from}${move.to}${move.promotion || ""}`,
+    color: colorName,
+    quality,
+    severity: primaryIssue?.severity ?? (quality === "best" ? 0 : 1),
+    fenBefore: move.before,
+    fenAfter: move.after,
+    issueIds: result.issues.map(issue => issue.id),
+    title: primaryIssue?.title ?? (quality === "best" ? "Best move" : "Good move"),
+    explanation: primaryIssue?.explanation ?? (
+      quality === "best"
+        ? `${move.san} was a forcing or high-value move.`
+        : `${move.san} did not trigger a recurring mistake pattern.`
+    ),
+    materialGain,
+  };
+}
 
 function analyzeMove({
   move, nextMove, ply, phase, color, game, opponent, mode
@@ -397,9 +544,31 @@ function analyzeMove({
   const after = new Chess(move.after);
   const moveNumber = getMoveNumber(move.before);
   const colorName: "white" | "black" = color === "w" ? "white" : "black";
+  const materialGain = materialScore(after, color) - materialScore(before, color);
+  const moveValue = pieceValues[move.piece] ?? 0;
+  const capturedValue = move.captured ? pieceValues[move.captured] ?? 0 : 0;
+  const uci = `${move.from}${move.to}${move.promotion || ""}`;
 
   const addIssue = (id: PatternId, severity: number, explanation: string, fenAfter = move.after) => {
-    issues.push({ id, phase, severity, title: copy[id].title, explanation, advice: copy[id].advice, moveNumber, san: move.san, fenBefore: move.before, fenAfter, gameUrl: game.url, opponent, color: colorName, opening: game.opening });
+    issues.push({
+      id,
+      phase,
+      quality: "inaccuracy",
+      severity,
+      title: copy[id].title,
+      explanation,
+      advice: copy[id].advice,
+      moveNumber,
+      san: move.san,
+      uci,
+      materialGain,
+      fenBefore: move.before,
+      fenAfter,
+      gameUrl: game.url,
+      opponent,
+      color: colorName,
+      opening: game.opening
+    });
   };
 
   // Map pattern IDs to skill dimensions
@@ -415,23 +584,29 @@ function analyzeMove({
     conversion: "conversion",
   };
 
-  // Detect loose pieces
+  // Detect loose pieces. Do not punish a forcing capture that wins substantial
+  // material: Bxd8 winning a queen is a success even if the bishop can later be
+  // recaptured.
   const loose = newLoosePiece(before, after, color);
-  if (loose && loose.value >= 3) {
+  const wonMeaningfulMaterial = capturedValue >= moveValue + 1.5 || materialGain >= 3;
+  if (!wonMeaningfulMaterial && loose && loose.value >= 3) {
     addIssue("loosePiece", loose.value >= 5 ? 9 : 6,
       `${move.san} left a ${pieceName(loose.piece)} on ${loose.square} loose.`);
     dimensions.push("tactical");
     quality = loose.value >= 5 ? "blunder" : "mistake";
   }
 
-  // Detect opponent reply threats (two-move blindspot)
+  // Detect opponent reply threats (two-move blindspot). This is only an initial
+  // candidate generator; Stockfish refinement is the source of truth for labels.
   if (nextMove && nextMove.color !== color) {
     const replyPos = new Chess(nextMove.after);
     const swing = materialScore(after, color) - materialScore(replyPos, color);
+    const sequenceGain = materialScore(replyPos, color) - materialScore(before, color);
     const replyHitPiece = nextMove.captured && pieceValues[nextMove.captured] >= 3;
     const replyForcing = Boolean(nextMove.captured) || nextMove.san.includes("+") || nextMove.san.includes("#");
+    const lineStillWinsMaterial = sequenceGain >= 2;
 
-    if (replyForcing && (swing >= 2.7 || replyHitPiece)) {
+    if (!lineStillWinsMaterial && replyForcing && (swing >= 2.7 || replyHitPiece)) {
       addIssue("twoMoveBlindspot", Math.min(10, 5 + Math.floor(swing)),
         `Reply ${nextMove.san} was forcing and swung eval by ~${Math.max(0, swing).toFixed(1)}.`);
       dimensions.push("tactical");
@@ -440,14 +615,14 @@ function analyzeMove({
   }
 
   // Check missed forcing moves (deep mode only)
-  if (mode === "deep") {
+  if (mode === "deep" && !issues.some(issue => issue.id === "twoMoveBlindspot" || issue.id === "loosePiece")) {
     const bestForcing = bestForcingMove(before, color);
     const moveWasForcing = Boolean(move.captured) || move.san.includes("+") || move.san.includes("#");
     if (bestForcing && !moveWasForcing && bestForcing.score >= 4.8) {
       addIssue("missedForcingMove", Math.min(9, bestForcing.score),
         `${bestForcing.san} was a strong forcing option, but ${move.san} was played.`);
       dimensions.push("tactical");
-      quality = "mistake";
+      quality = "miss";
     }
   }
 
@@ -490,9 +665,12 @@ function analyzeMove({
     }
   }
 
-  // Detect excellent moves (captures of high-value pieces, checks leading to material gain)
+  // Detect excellent moves conservatively. A routine minor-piece capture is
+  // not automatically "best" unless it wins material without leaving the
+  // moved piece immediately loose.
   if (issues.length === 0) {
-    if (move.captured && pieceValues[move.captured] >= 3) quality = "excellent";
+    const movedPieceLoose = loosePieces(after, color).some(piece => piece.square === move.to && piece.value >= capturedValue);
+    if (move.captured && !movedPieceLoose && (move.captured === "q" || materialGain >= 3)) quality = "excellent";
     if (move.san.includes("#")) quality = "excellent";
   }
 
@@ -504,7 +682,9 @@ function getPhase(fen: string, ply: number): Phase {
   const chess = new Chess(fen);
   const material = totalMaterial(chess);
   const queens = countPieces(chess, "q");
-  if (queens === 0 || material <= 26 || ply >= 70) return "endgame";
+  const minors = countPieces(chess, "n") + countPieces(chess, "b");
+  const rooks = countPieces(chess, "r");
+  if (ply >= 70 || material <= 20 || (queens === 0 && (material <= 30 || minors <= 2 || rooks <= 2))) return "endgame";
   if (ply <= 20) return "opening";
   return "middlegame";
 }
@@ -533,14 +713,31 @@ function loosePieces(chess: Chess, color: Color) {
 function bestForcingMove(chess: Chess, color: Color) {
   return chess.moves({ verbose: true })
     .filter(m => m.color === color)
-    .map(m => ({
-      san: m.san,
-      score: (m.captured ? pieceValues[m.captured] : 0) +
-              (m.san.includes("+") ? 1.2 : 0) +
-              (m.san.includes("#") ? 100 : 0) +
-              (m.captured === "q" || m.captured === "r" ? 1.5 : 0)
-    }))
+    .map(m => {
+      const next = new Chess(chess.fen());
+      next.move(m);
+      const recaptureRisk = next.attackers(m.to, opposite(color)).length ? pieceValues[m.piece] * 0.75 : 0;
+      const netCapture = m.captured ? pieceValues[m.captured] - recaptureRisk : 0;
+      return {
+        san: m.san,
+        score: netCapture +
+          (m.san.includes("+") ? 0.8 : 0) +
+          (m.san.includes("#") ? 100 : 0) +
+          (m.captured === "q" || m.captured === "r" ? 1 : 0)
+      };
+    })
     .sort((a, b) => b.score - a.score)[0];
+}
+
+function hasForcingOpportunity(chess: Chess, color: Color) {
+  const forcing = bestForcingMove(chess, color);
+  return Boolean(forcing && forcing.score >= 2.5);
+}
+
+function isKingSafetyMove(move: VerboseMove, before: Chess, after: Chess, color: Color) {
+  return move.piece === "k" ||
+    castledKingShelterLoss(before, after, color) !== null ||
+    openingPrincipleIssue(move, before, after, color, getMoveNumber(move.before))?.id === "delayedCastle";
 }
 
 // ---- Opening principles ----
@@ -550,7 +747,7 @@ function openingPrincipleIssue(move: VerboseMove, before: Chess, after: Chess, c
   const developed = developedMinorPieces(after, color);
   const patternId = (id: PatternId) => id;
 
-  if (!hasCastled && ply >= 14 && !canCastleSoon(after, color)) {
+  if (!hasCastled && ply >= 14 && !before.inCheck() && move.piece !== "k" && !canCastleSoon(after, color)) {
     return { id: patternId("delayedCastle"), severity: 7, explanation: `${move.san} left king in center after opening.` };
   }
   if ((move.piece === "n" || move.piece === "b") && ply <= 18) {
@@ -562,7 +759,7 @@ function openingPrincipleIssue(move: VerboseMove, before: Chess, after: Chess, c
   if (move.piece === "q" && ply <= 14 && developed < 2) {
     return { id: patternId("queenEarly"), severity: 5, explanation: `${move.san} brought queen out before piece development.` };
   }
-  if (move.piece === "p" && isFlankPawnMove(move.from, color) && ply <= 20) {
+  if (move.piece === "p" && isFlankPawnMove(move.from, color) && ply <= 20 && !isKnownOpeningPawnBreak(move)) {
     return { id: patternId("kingShelter"), severity: 5, explanation: `${move.san} weakened future castled king squares.` };
   }
   return null;
@@ -690,10 +887,18 @@ function distanceToCenter(square: Square): number {
 
 function opposite(color: Color): Color { return color === "w" ? "b" : "w"; }
 function pieceName(p: PieceSymbol): string { return { p: "pawn", n: "knight", b: "bishop", r: "rook", q: "queen", k: "king" }[p] || ""; }
-function getMoveNumber(fen: string): number { return Number(fen.split(" ")[5] ?? 1); }
+function getMoveNumber(fen: string): number {
+  const parts = fen.trim().split(/\s+/);
+  const moveNumber = Number(parts.length >= 6 ? parts[5] : 1);
+  return Number.isFinite(moveNumber) && moveNumber > 0 ? moveNumber : 1;
+}
 
 function isFlankPawnMove(square: Square, color: Color): boolean {
-  return color === "w" ? square[1] === "2" && "abcfgh".includes(square[0]) : square[1] === "7" && "abcfgh".includes(square[0]);
+  return color === "w" ? square[1] === "2" && "abgh".includes(square[0]) : square[1] === "7" && "abgh".includes(square[0]);
+}
+
+function isKnownOpeningPawnBreak(move: VerboseMove): boolean {
+  return ["c4", "c5", "f4", "f5", "g3", "g6", "b3", "b6"].includes(move.san.replace(/[+#?!]/g, ""));
 }
 
 // ---- Summarize ----
@@ -720,7 +925,17 @@ function summarizeIssues(issues: MoveIssue[]): PatternSummary[] {
 // ---- PGN helpers ----
 function headersFromPgn(pgn: string) {
   const read = (name: string) => pgn.match(new RegExp(`\\[${name}\\s+"([^"]*)"\\]`))?.[1];
-  return { white: read("White"), black: read("Black"), url: read("Link") ?? read("Site") };
+  const rating = (name: string) => {
+    const value = Number(read(name));
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  };
+  return {
+    white: read("White"),
+    black: read("Black"),
+    whiteRating: rating("WhiteElo"),
+    blackRating: rating("BlackElo"),
+    url: read("Link") ?? read("Site")
+  };
 }
 
 function resultForColor(color: Color, game: ParsedGame, pgnResult?: string): GameSummary["result"] {
