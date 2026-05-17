@@ -7,7 +7,7 @@ import {
   User, X, RefreshCw, Link2, Clock3, Repeat2
 } from "lucide-react";
 import { fetchChessComGames, fetchChessComProfile, ImportProgress } from "./analysis/chesscom";
-import type { AnalysisReport, GameSummary, MoveIssue, MoveReview, MoveReviewQuality, PatternSummary, Phase, SkillDimension, TrainingRecommendation } from "./analysis/patterns";
+import type { AnalysisReport, GameSummary, MoveIssue, MoveQualityDistribution, MoveReview, MoveReviewQuality, PatternSummary, Phase, SkillDimension, TrainingRecommendation } from "./analysis/patterns";
 import BoardFrame from "./components/BoardFrame";
 import DrillPanel from "./components/DrillPanel";
 import { formatEval as formatEngineEval, formatUci as formatEngineUci } from "./components/EngineReadout";
@@ -444,6 +444,11 @@ export default function App() {
                 topPhase={topPhase}
                 boardHighlights={boardHighlights}
                 openAnalysis={openAnalysis}
+                openGame={(gameId) => {
+                  setSelectedGameId(gameId);
+                  setActiveView("games");
+                }}
+                openMistakes={() => setActiveView("mistakes")}
                 openQuality={(quality) => {
                   setQualityFilter(quality);
                   setDrillStartInPuzzle(false);
@@ -892,150 +897,156 @@ function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, set
   );
 }
 
-function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHighlights, openQuality, trainNow, openAnalysis, syncMeta }: {
+function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHighlights, openQuality, trainNow, openAnalysis, syncMeta, openGame, openMistakes }: {
   report: AnalysisReport; selectedIssue: MoveIssue | null; setSelectedIssue: (i: MoveIssue) => void;
   topPhase: Phase; boardHighlights: Record<string, string>;
   openQuality: (quality: MoveReviewQuality) => void;
   trainNow: () => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string) => void;
   syncMeta: SyncMeta;
+  openGame: (gameId: number) => void;
+  openMistakes: () => void;
 }) {
   const { skillProfile, moveQuality } = report;
-  const dueIssues = report.issues
+  const trainableReviews = report.moveReviews.filter(review => isTrainableQuality(review.quality));
+  const reviewedMoves = Math.max(1, report.moveReviews.length);
+  const strongMovePct = Math.round(((moveQuality.good + moveQuality.excellent) / reviewedMoves) * 100);
+  const criticalCount = trainableReviews.length;
+  const blunderCount = report.moveReviews.filter(review => qualityBucket(review.quality) === "blunder").length;
+  const topSummary = report.summaries[0];
+  const focusIssue = selectedIssue || topSummary?.examples[0] || report.issues[0] || null;
+  const recentGames = report.gameSummaries
     .slice()
-    .sort((a, b) => b.severity - a.severity)
-    .slice(0, 4);
+    .sort((a, b) => (b.endTime ?? b.id) - (a.endTime ?? a.id))
+    .slice(0, 3);
+  const sharpGames = report.gameSummaries
+    .slice()
+    .sort((a, b) => b.issues - a.issues || (b.endTime ?? b.id) - (a.endTime ?? a.id))
+    .slice(0, 2);
+  const strongest = dimensionLabels[skillProfile.strongest];
+  const weakest = dimensionLabels[skillProfile.weakest];
 
   return (
-    <section className="dashboard restored-dashboard">
-      <div className="dashboard-actions">
-        <button className="primary-button" onClick={trainNow}><Dumbbell size={16} /> Drill mode</button>
-      </div>
-
-      <div className="metric-grid">
-        <Metric icon={<Crown size={16} />} label="Games" value={report.games.toString()} />
-        <Metric icon={<Swords size={16} />} label="Moves" value={report.moves.toString()} />
-        <Metric icon={<Target size={16} />} label="Patterns" value={report.issues.length.toString()} />
-        <Metric icon={<TrendingUp size={16} />} label="Est. rating" value={skillProfile.estimatedRating.toString()} />
-      </div>
-
-      <section className="trainer-panel sync-panel">
-        <div className="panel-heading"><RefreshCw size={16} /><h2>Game sync</h2></div>
-        <p>{syncMeta.message || "Your latest public Chess.com games will refresh automatically when the app opens."}</p>
-        {syncMeta.lastSyncedAt && <small>Last updated {new Date(syncMeta.lastSyncedAt).toLocaleString()}</small>}
+    <section className="dashboard intelligent-dashboard">
+      <section className="dashboard-command-card">
+        <div>
+          <span className="eyebrow">Dashboard</span>
+          <h2>{topSummary?.title || "Your games are mapped"}</h2>
+          <p>{topSummary?.advice || "Your latest games are synced and ready for replay, review, and drills."}</p>
+        </div>
+        <div className="dashboard-command-actions">
+          <button className="primary-button" onClick={trainNow}><Dumbbell size={16} /> Drill</button>
+          <button className="ghost-button" onClick={openMistakes}><AlertTriangle size={16} /> Mistakes</button>
+        </div>
       </section>
 
-      <section className="coach-grid">
-        <div className="trainer-panel priority-panel">
-          <div className="panel-heading"><Brain size={16} /><h2>Focus area</h2></div>
-          {report.summaries[0] ? (
+      <div className="dashboard-kpi-grid">
+        <DashboardKpi label="Good moves" value={`${strongMovePct}%`} detail={`${moveQuality.good + moveQuality.excellent}/${report.moveReviews.length || 0} reviewed`} tone="good" />
+        <DashboardKpi label="Critical" value={criticalCount.toString()} detail={`${blunderCount} blunders`} tone="bad" />
+        <DashboardKpi label="Rating" value={skillProfile.estimatedRating.toString()} detail={`Peak ${report.peakRating || "-"}`} tone="neutral" />
+      </div>
+
+      <section className="dashboard-quality-card">
+        <div className="dashboard-section-title">
+          <span>Move Quality</span>
+          <strong>{report.games} games</strong>
+        </div>
+        <QualityStack moveQuality={moveQuality} />
+        <div className="quality-mini-grid">
+          <button onClick={() => openQuality("blunder")}><span>Blunder</span><strong>{moveQuality.blunders}</strong></button>
+          <button onClick={() => openQuality("mistake")}><span>Mistake</span><strong>{moveQuality.mistakes}</strong></button>
+          <button onClick={() => openQuality("good")}><span>Good</span><strong>{moveQuality.good + moveQuality.excellent}</strong></button>
+        </div>
+      </section>
+
+      <section className="dashboard-focus-grid">
+        <div className="dashboard-insight-card">
+          <div className="dashboard-section-title">
+            <span>Profile</span>
+            <strong>{topPhase}</strong>
+          </div>
+          <div className="strength-row good"><span>Strongest</span><strong>{strongest}</strong></div>
+          <div className="strength-row bad"><span>Needs work</span><strong>{weakest}</strong></div>
+          {topSummary && <PhaseBars summary={topSummary} />}
+        </div>
+
+        <div className="dashboard-lens-card">
+          <div className="dashboard-section-title">
+            <span>Key Position</span>
+            {focusIssue && <strong>{qualityLabel(focusIssue.quality)}</strong>}
+          </div>
+          {focusIssue ? (
             <>
-              <h3>{report.summaries[0].title}</h3>
-              <p>{report.summaries[0].advice}</p>
-              <PhaseBars summary={report.summaries[0]} />
+              <BoardFrame
+                fen={focusIssue.fenAfter || focusIssue.fenBefore}
+                flipped={focusIssue.color === "black"}
+                highlightSquares={boardHighlights}
+                onAnalyze={() => openAnalysis(focusIssue.fenBefore, focusIssue.color === "black", focusIssue.title)}
+                size={360}
+              />
+              <button className="dashboard-position-row" onClick={() => setSelectedIssue(focusIssue)}>
+                <span>{focusIssue.phase}</span>
+                <strong>{focusIssue.san}</strong>
+                <b>{focusIssue.title}</b>
+              </button>
             </>
           ) : (
-            <p>No recurring patterns found in this sample.</p>
-          )}
-        </div>
-
-        <div className="trainer-panel board-panel">
-          <div className="panel-heading"><Target size={16} /><h2>Position lens</h2></div>
-          <div className="dashboard-board-frame">
-            <BoardFrame
-              fen={selectedIssue?.fenAfter || selectedIssue?.fenBefore}
-              flipped={selectedIssue?.color === "black"}
-              highlightSquares={boardHighlights}
-              onAnalyze={() => openAnalysis(selectedIssue?.fenBefore, selectedIssue?.color === "black", selectedIssue?.title)}
-              size={420}
-            />
-          </div>
-          {selectedIssue && (
-            <div className="position-caption">
-              <strong>{selectedIssue.moveNumber}. {selectedIssue.san}</strong>
-              <span>{selectedIssue.explanation}</span>
-            </div>
+            <p>No key position yet.</p>
           )}
         </div>
       </section>
 
-      <section className="skill-section">
-        <div className="skill-header"><BarChart3 size={16} /><h2>Skill profile</h2></div>
-        <div className="skill-profile-card">
-          <div className="skill-profile-header">
-            <div className="profile-left">
-              <h3>Your chess DNA</h3>
-              <p>{skillProfile.descriptions[skillProfile.strongest]}</p>
-            </div>
-            <div className="rating-display">
-              <div className="rating-number">{skillProfile.estimatedRating}</div>
-              <div className="rating-label">Estimated rating</div>
-            </div>
-          </div>
-
-          <div className="dimension-grid">
-            {(Object.entries(skillProfile.scores) as [SkillDimension, number][]).map(([dim, score]) => (
-              <div key={dim} className="dimension-row">
-                <span className="dimension-label">{dimensionLabels[dim]}</span>
-                <div className="dimension-bar">
-                  <div className="dimension-fill" style={{ width: `${score}%` }} />
-                </div>
-                <span className="dimension-value">{score}</span>
+      <section className="dashboard-games-card">
+        <div className="dashboard-section-title">
+          <span>Recent Games</span>
+          <strong>{syncMeta.message || "Synced"}</strong>
+        </div>
+        <div className="dashboard-game-list">
+          {(recentGames.length ? recentGames : sharpGames).map(game => (
+            <button key={game.id} onClick={() => openGame(game.id)}>
+              <div>
+                <strong>{game.opponent || "Unknown"}</strong>
+                <span>{[game.timeClass, game.opening || game.result].filter(Boolean).join(" • ") || "Game review"}</span>
               </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <section>
-        <div className="skill-header"><Zap size={16} /><h2>Move quality distribution</h2></div>
-        <div className="quality-grid">
-          <QualityChip label="Blunders" value={moveQuality.blunders} />
-          <QualityChip label="Mistakes" value={moveQuality.mistakes} />
-          <QualityChip label="Inaccuracies" value={moveQuality.inaccuracies} />
-          <QualityChip label="Good" value={moveQuality.good} />
-          <QualityChip label="Excellent" value={moveQuality.excellent} />
-        </div>
-      </section>
-
-      <section>
-        <div className="skill-header"><Target size={16} /><h2>Patterns</h2></div>
-        <div className="pattern-list">
-          {report.summaries.map(s => (
-            <PatternCard key={s.id} summary={s} setSelectedIssue={setSelectedIssue} />
-          ))}
-        </div>
-      </section>
-
-      <section className="trainer-panel drill-queue-card">
-        <div className="panel-heading"><Clock3 size={16} /><h2>Today&apos;s drill queue</h2></div>
-        <div className="due-list">
-          {dueIssues.length ? dueIssues.map(issue => (
-            <button key={`${issue.fenBefore}-${issue.uci}-${issue.id}`} onClick={() => setSelectedIssue(issue)}>
-              <span>{issue.moveNumber}. {issue.san}</span>
-              <strong>{issue.title}</strong>
-              <small>{issue.opening || issue.phase}</small>
+              <b>{game.issues}</b>
             </button>
-          )) : (
-            <p>No trainable mistakes yet. Sync more games or paste a PGN to build a queue.</p>
-          )}
-        </div>
-      </section>
-
-      <section className="trainer-panel">
-        <div className="panel-heading"><Activity size={16} /><h2>Games with training signal</h2></div>
-        <div className="game-table">
-          {report.gameSummaries.slice().sort((a, b) => b.issues - a.issues).slice(0, 8).map((g, i) => (
-            <a href={g.url} target="_blank" rel="noreferrer" className="game-row" key={`${g.url}-${i}`}>
-              <span>{g.opponent || "Unknown"}</span>
-              <span>{g.opening || "-"}</span>
-              <span>{g.color}</span>
-              <strong>{g.issues}</strong>
-            </a>
           ))}
         </div>
+        {syncMeta.lastSyncedAt && <small>Updated {new Date(syncMeta.lastSyncedAt).toLocaleString()}</small>}
       </section>
     </section>
+  );
+}
+
+function DashboardKpi({ label, value, detail, tone }: { label: string; value: string; detail: string; tone: "good" | "bad" | "neutral" }) {
+  return (
+    <div className={`dashboard-kpi ${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </div>
+  );
+}
+
+function QualityStack({ moveQuality }: { moveQuality: MoveQualityDistribution }) {
+  const items = [
+    { key: "blunders", value: moveQuality.blunders, label: "Blunders" },
+    { key: "mistakes", value: moveQuality.mistakes + moveQuality.inaccuracies, label: "Mistakes" },
+    { key: "good", value: moveQuality.good, label: "Good" },
+    { key: "excellent", value: moveQuality.excellent, label: "Best" },
+  ];
+  const total = Math.max(1, items.reduce((sum, item) => sum + item.value, 0));
+  return (
+    <div className="quality-stack" aria-label="Move quality distribution">
+      {items.map(item => (
+        <span
+          key={item.key}
+          className={item.key}
+          style={{ width: `${Math.max(4, (item.value / total) * 100)}%` }}
+          title={`${item.label}: ${item.value}`}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -2007,6 +2018,8 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => void;
 }) {
   const [timeFilter, setTimeFilter] = useState("all");
+  const [selectedPly, setSelectedPly] = useState(0);
+  const [showReport, setShowReport] = useState(false);
   const sortedGames = useMemo(
     () => report.gameSummaries
       .filter(game => timeFilter === "all" || game.timeClass === timeFilter)
@@ -2016,48 +2029,17 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
   );
   const game = sortedGames.find(candidate => candidate.id === selectedGameId);
   const reviews = useMemo(() => report.moveReviews.filter(review => review.gameId === game?.id), [report.moveReviews, game?.id]);
-  const [selectedReviewId, setSelectedReviewId] = useState(reviews[0]?.id || "");
-  const selectedReview = reviews.find(review => review.id === selectedReviewId) || reviews[0];
-  const [playFen, setPlayFen] = useState(selectedReview?.fenBefore || "");
-  const [lastEngineMove, setLastEngineMove] = useState("");
-  const [boardEval, setBoardEval] = useState<EngineEvaluation | null>(null);
-  const [autoReply, setAutoReply] = useState(false);
-  const { ready, error, evaluatePosition } = useStockfish();
+  const timeline = useMemo(() => game ? buildGameTimeline(game, reviews) : [], [game, reviews]);
+  const initialFen = timeline[0]?.fenBefore || new Chess().fen();
+  const selectedMove = selectedPly > 0 ? timeline[Math.min(selectedPly - 1, timeline.length - 1)] : null;
+  const currentFen = selectedMove?.fenAfter || initialFen;
+  const currentReview = selectedMove?.review || null;
+  const gameReport = useMemo(() => game ? buildGameReportModel(game, timeline, reviews) : null, [game, timeline, reviews]);
 
   useEffect(() => {
-    setSelectedReviewId(reviews[0]?.id || "");
-    setPlayFen(reviews[0]?.fenBefore || "");
-    setLastEngineMove("");
-    setBoardEval(null);
-  }, [selectedGameId, reviews]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const fen = playFen || selectedReview?.fenBefore;
-    if (!fen) return;
-    setBoardEval(null);
-    evaluatePosition(fen, ENGINE_DEPTH).then(result => {
-      if (cancelled) return;
-      setBoardEval(result);
-    });
-    return () => { cancelled = true; };
-  }, [playFen, selectedReview?.fenBefore, evaluatePosition]);
-
-  const playMove = async (from: string, to: string, promotion?: string) => {
-    const board = new Chess(playFen || selectedReview?.fenBefore);
-    const move = board.move({ from, to, promotion: promotion || "q" });
-    if (!move) return;
-    const afterUser = board.fen();
-    setPlayFen(afterUser);
-    const engine = await evaluatePosition(afterUser, ENGINE_DEPTH);
-    setBoardEval(engine);
-    setLastEngineMove(engine.bestMove);
-    if (autoReply && engine.bestMove) {
-      const response = new Chess(afterUser);
-      const reply = response.move({ from: engine.bestMove.slice(0, 2), to: engine.bestMove.slice(2, 4), promotion: engine.bestMove[4] || "q" });
-      if (reply) setPlayFen(response.fen());
-    }
-  };
+    setSelectedPly(0);
+    setShowReport(false);
+  }, [selectedGameId]);
 
   const qualityCountsForGame = (id: number) => {
     const gameReviews = report.moveReviews.filter(review => review.gameId === id);
@@ -2070,9 +2052,12 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
   if (!game) {
     return (
       <section className="games-screen mobile-screen">
-      <div className="screen-intro">
-        <h2>Games</h2>
-        <p>Browse your played games. Open one when you want the board, engine lines, and move review.</p>
+      <div className="games-library-head">
+        <div>
+          <span className="eyebrow">Games</span>
+          <h2>Game Library</h2>
+        </div>
+        <strong>{sortedGames.length}</strong>
       </div>
 
       <label className="pattern-select">
@@ -2094,7 +2079,7 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
               <span>{[summary.timeClass, summary.opening || summary.result].filter(Boolean).join(" • ") || "Game review"}</span>
             </div>
             <b>{qualityCountsForGame(summary.id).critical}</b>
-            <small>{summary.endTime ? new Date(summary.endTime * 1000).toLocaleDateString() : "PGN"}</small>
+            <small>{summary.endTime ? new Date(summary.endTime * 1000).toLocaleDateString() : "PGN"} · {summary.moveCount} moves · {summary.color}</small>
           </button>
         ))}
       </div>
@@ -2102,13 +2087,19 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
     );
   }
 
+  const jumpBy = (delta: number) => {
+    setSelectedPly(current => Math.max(0, Math.min(timeline.length, current + delta)));
+  };
+
   return (
     <section className="games-screen mobile-screen">
       <div className="detail-topbar">
         <button className="ghost-button" onClick={() => setSelectedGameId(-1)}><ArrowLeft size={16} /> Games</button>
-        <button className="ghost-button" onClick={() => selectedReview && openMove(selectedReview)} disabled={!selectedReview}>Open move</button>
-        <button className={`ghost-button ${autoReply ? "active" : ""}`} onClick={() => setAutoReply(value => !value)}>
-          {autoReply ? "Engine replies on" : "Free explore"}
+        <button className="ghost-button" onClick={() => openAnalysis(currentFen, game.color === "black", game.opponent || "Game analysis", { gamePgn: game.pgn })}>
+          <Search size={16} /> Analyze
+        </button>
+        <button className={`ghost-button ${showReport ? "active" : ""}`} onClick={() => setShowReport(value => !value)} aria-label="Request game analysis">
+          <BarChart3 size={16} /> {showReport ? "Board" : "Request"}
         </button>
       </div>
 
@@ -2123,66 +2114,258 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
       </div>
 
       <div className="game-review-board">
+        <GamePlayerStrip game={game} />
         <BoardFrame
-          fen={playFen || selectedReview?.fenBefore}
+          fen={currentFen}
           flipped={game.color === "black"}
-          evaluation={boardEval}
-          interactive
-          onMove={playMove}
-          onGestureBack={() => {
-            const currentIndex = reviews.findIndex(review => review.id === selectedReview?.id);
-            const previous = reviews[Math.max(0, currentIndex - 1)];
-            if (previous) {
-              setSelectedReviewId(previous.id);
-              setPlayFen(previous.fenBefore);
-              setLastEngineMove("");
-            }
-          }}
-          onGestureForward={() => {
-            const currentIndex = reviews.findIndex(review => review.id === selectedReview?.id);
-            const next = reviews[Math.min(reviews.length - 1, currentIndex + 1)];
-            if (next) {
-              setSelectedReviewId(next.id);
-              setPlayFen(next.fenBefore);
-              setLastEngineMove("");
-            }
-          }}
-          lastMove={lastEngineMove ? { from: lastEngineMove.slice(0, 2), to: lastEngineMove.slice(2, 4) } : undefined}
-          onAnalyze={() => openAnalysis(playFen || selectedReview?.fenBefore, game.color === "black", game.opponent || "Game analysis", { gamePgn: game.pgn })}
+          evalCp={currentReview?.engineEvalAfter}
+          lastMove={selectedMove?.lastMove}
+          onGestureBack={() => jumpBy(-1)}
+          onGestureForward={() => jumpBy(1)}
+          onAnalyze={() => openAnalysis(currentFen, game.color === "black", game.opponent || "Game analysis", { gamePgn: game.pgn })}
           size={340}
         />
-        <EngineSuggestions evaluation={boardEval} ready={ready} error={error} />
+        <div className="game-replay-controls" aria-label="Game replay controls">
+          <button onClick={() => setSelectedPly(0)} disabled={selectedPly <= 0} aria-label="Go to start"><ChevronLeft size={18} /><ChevronLeft size={18} /></button>
+          <button onClick={() => jumpBy(-1)} disabled={selectedPly <= 0} aria-label="Previous move"><ChevronLeft size={19} /></button>
+          <span>{selectedPly} / {timeline.length}</span>
+          <button onClick={() => jumpBy(1)} disabled={selectedPly >= timeline.length} aria-label="Next move"><ChevronRight size={19} /></button>
+          <button onClick={() => setSelectedPly(timeline.length)} disabled={selectedPly >= timeline.length} aria-label="Go to end"><ChevronRight size={18} /><ChevronRight size={18} /></button>
+        </div>
       </div>
 
-      {selectedReview && (
-        <div className="selected-move-panel">
-          <div><span>You played</span><strong>{selectedReview.san}</strong></div>
-          <div><span>Engine suggests</span><strong>{formatEngineUci(boardEval?.bestMove) || "Calculating..."}</strong></div>
-          <div><span>Evaluation</span><strong>{formatEngineEval(boardEval?.evalCp, boardEval?.mate) || "Calculating..."}</strong></div>
-          <p>{selectedReview.explanation}</p>
-          {boardEval?.pv && <small>Line: {boardEval.pv.split(" ").slice(0, 8).map(formatEngineUci).join(" ")}</small>}
+      {showReport && gameReport && (
+        <GameReportPanel report={gameReport} playerColor={game.color} />
+      )}
+
+      {currentReview && !showReport && (
+        <div className="selected-move-panel compact">
+          <div><span>{currentReview.color === game.color ? "You played" : "Move"}</span><strong>{currentReview.san}</strong></div>
+          <div><span>Better</span><strong>{formatEngineUci(currentReview.engineBestMove || currentReview.engineLines?.[0]?.bestMove) || "-"}</strong></div>
+          <div><span>Eval swing</span><strong>{formatReviewSwing(currentReview)}</strong></div>
+          <button className="ghost-button" onClick={() => openMove(currentReview)}>{qualityLabel(currentReview.quality)} detail</button>
         </div>
       )}
 
-      <div className="move-review-list">
-        {reviews.map(review => (
+      <div className="game-move-strip" aria-label="Game move list">
+        <button className={selectedPly === 0 ? "active start" : "start"} onClick={() => setSelectedPly(0)}>Start</button>
+        {timeline.map(move => (
           <button
-            key={review.id}
-            className={review.id === selectedReview?.id ? "active" : ""}
-            onClick={() => {
-              setSelectedReviewId(review.id);
-              setPlayFen(review.fenBefore);
-              setLastEngineMove("");
-            }}
-            onDoubleClick={() => openMove(review)}
+            key={`${move.ply}-${move.uci}`}
+            className={`${selectedPly === move.ply ? "active" : ""} ${move.review ? qualityBucket(move.review.quality) : ""} ${move.color === (game.color === "white" ? "w" : "b") ? "user-move" : ""}`.trim()}
+            onClick={() => setSelectedPly(move.ply)}
+            onDoubleClick={() => move.review && openMove(move.review)}
           >
-            <span>{review.moveNumber}. {review.san}</span>
-            <small className={qualityBucket(review.quality)}>{qualityLabel(review.quality)}</small>
-            <p>{review.explanation}</p>
+            {move.moveNumber}. {move.color === "b" ? "..." : ""}{move.san}
           </button>
         ))}
       </div>
     </section>
+  );
+}
+
+type GameTimelineMove = {
+  ply: number;
+  moveNumber: number;
+  san: string;
+  uci: string;
+  color: "w" | "b";
+  fenBefore: string;
+  fenAfter: string;
+  lastMove: { from: string; to: string };
+  captured?: string;
+  review?: MoveReview;
+};
+
+type GameSideStats = {
+  name: string;
+  color: "white" | "black";
+  moves: number;
+  captures: number;
+  checks: number;
+  castles: number;
+  critical: number;
+  best: number;
+  avgLoss: number | null;
+  reviewScore: number | null;
+};
+
+type GameReportModel = {
+  white: GameSideStats;
+  black: GameSideStats;
+  graph: Array<{ ply: number; evalCp: number; quality?: MoveReviewQuality; label: string }>;
+  decisiveMoment?: GameTimelineMove;
+};
+
+function buildGameTimeline(game: GameSummary, reviews: MoveReview[]): GameTimelineMove[] {
+  const source = new Chess();
+  try {
+    source.loadPgn(game.pgn, { strict: false });
+  } catch {
+    return reviews.map((review, index) => ({
+      ply: index + 1,
+      moveNumber: review.moveNumber,
+      san: review.san,
+      uci: review.uci,
+      color: review.color === "white" ? "w" : "b",
+      fenBefore: review.fenBefore,
+      fenAfter: review.fenAfter,
+      lastMove: { from: review.uci.slice(0, 2), to: review.uci.slice(2, 4) },
+      review,
+    }));
+  }
+
+  const replay = new Chess();
+  const history = source.history({ verbose: true });
+  return history.flatMap((move, index) => {
+    const fenBefore = replay.fen();
+    const uci = `${move.from}${move.to}${move.promotion || ""}`;
+    const review = reviews.find(item => item.fenBefore === fenBefore && item.uci === uci);
+    const played = replay.move({ from: move.from, to: move.to, promotion: move.promotion || "q" });
+    if (!played) return [];
+    return [{
+      ply: index + 1,
+      moveNumber: Math.ceil((index + 1) / 2),
+      san: played.san,
+      uci,
+      color: played.color,
+      fenBefore,
+      fenAfter: replay.fen(),
+      lastMove: { from: played.from, to: played.to },
+      captured: played.captured,
+      review,
+    }];
+  });
+}
+
+function buildGameReportModel(game: GameSummary, timeline: GameTimelineMove[], reviews: MoveReview[]): GameReportModel {
+  const headers = gameHeaders(game.pgn);
+  const whiteName = headers.White || (game.color === "white" ? "You" : game.opponent || "Opponent");
+  const blackName = headers.Black || (game.color === "black" ? "You" : game.opponent || "Opponent");
+  const white = buildSideStats("white", whiteName, timeline, reviews);
+  const black = buildSideStats("black", blackName, timeline, reviews);
+  const graph = buildGameEvalGraph(timeline);
+  const decisiveMoment = timeline
+    .filter(move => move.review && isTrainableQuality(move.review.quality))
+    .sort((a, b) => reviewLossCp(b.review!) - reviewLossCp(a.review!))[0];
+  return { white, black, graph, decisiveMoment };
+}
+
+function buildSideStats(color: "white" | "black", name: string, timeline: GameTimelineMove[], reviews: MoveReview[]): GameSideStats {
+  const moveColor = color === "white" ? "w" : "b";
+  const moves = timeline.filter(move => move.color === moveColor);
+  const sideReviews = reviews.filter(review => review.color === color);
+  const losses = sideReviews.map(reviewLossCp).filter(loss => Number.isFinite(loss));
+  const avgLoss = losses.length ? Math.round(losses.reduce((sum, loss) => sum + loss, 0) / losses.length) : null;
+  const reviewScore = avgLoss === null ? null : Math.max(0, Math.min(100, Math.round(100 - avgLoss / 12)));
+  return {
+    name,
+    color,
+    moves: moves.length,
+    captures: moves.filter(move => move.captured).length,
+    checks: moves.filter(move => move.san.includes("+") || move.san.includes("#")).length,
+    castles: moves.filter(move => move.san === "O-O" || move.san === "O-O-O").length,
+    critical: sideReviews.filter(review => isTrainableQuality(review.quality)).length,
+    best: sideReviews.filter(review => review.quality === "best" || review.quality === "good").length,
+    avgLoss,
+    reviewScore,
+  };
+}
+
+function buildGameEvalGraph(timeline: GameTimelineMove[]) {
+  const graph: Array<{ ply: number; evalCp: number; quality?: MoveReviewQuality; label: string }> = [{ ply: 0, evalCp: 0, label: "Start" }];
+  let lastEval = 0;
+  for (const move of timeline) {
+    if (typeof move.review?.engineEvalAfter === "number") lastEval = move.review.engineEvalAfter;
+    graph.push({ ply: move.ply, evalCp: lastEval, quality: move.review?.quality, label: move.san });
+  }
+  return graph;
+}
+
+function gameHeaders(pgn: string) {
+  const headers: Record<string, string> = {};
+  for (const line of pgn.split(/\r?\n/)) {
+    const match = line.match(/^\[([A-Za-z0-9_]+)\s+"(.*)"\]$/);
+    if (match) headers[match[1]] = match[2];
+  }
+  return headers;
+}
+
+function GamePlayerStrip({ game }: { game: GameSummary }) {
+  const headers = gameHeaders(game.pgn);
+  const playerName = game.color === "white" ? headers.White || "You" : headers.Black || "You";
+  const opponentName = game.color === "white" ? headers.Black || game.opponent || "Opponent" : headers.White || game.opponent || "Opponent";
+  return (
+    <div className="game-player-strip">
+      <div className={game.color === "white" ? "active" : ""}>
+        <span>White</span>
+        <strong>{game.color === "white" ? playerName : opponentName}</strong>
+      </div>
+      <b>{game.result}</b>
+      <div className={game.color === "black" ? "active" : ""}>
+        <span>Black</span>
+        <strong>{game.color === "black" ? playerName : opponentName}</strong>
+      </div>
+    </div>
+  );
+}
+
+function GameReportPanel({ report, playerColor }: { report: GameReportModel; playerColor: "white" | "black" }) {
+  const player = playerColor === "white" ? report.white : report.black;
+  const opponent = playerColor === "white" ? report.black : report.white;
+  return (
+    <section className="game-report-panel">
+      <div className="dashboard-section-title">
+        <span>Game Report</span>
+        {report.decisiveMoment && <strong>{report.decisiveMoment.moveNumber}. {report.decisiveMoment.san}</strong>}
+      </div>
+      <GameEvalGraph points={report.graph} />
+      <div className="game-report-columns">
+        <GameStatsColumn title="You" stats={player} />
+        <GameStatsColumn title="Opponent" stats={opponent} />
+      </div>
+    </section>
+  );
+}
+
+function GameStatsColumn({ title, stats }: { title: string; stats: GameSideStats }) {
+  return (
+    <div className="game-stats-column">
+      <span>{title}</span>
+      <strong>{stats.name}</strong>
+      <dl>
+        <div><dt>Review</dt><dd>{stats.reviewScore === null ? "-" : stats.reviewScore}</dd></div>
+        <div><dt>Critical</dt><dd>{stats.critical}</dd></div>
+        <div><dt>Best/Good</dt><dd>{stats.best}</dd></div>
+        <div><dt>Captures</dt><dd>{stats.captures}</dd></div>
+        <div><dt>Checks</dt><dd>{stats.checks}</dd></div>
+        <div><dt>Castled</dt><dd>{stats.castles ? "Yes" : "No"}</dd></div>
+      </dl>
+    </div>
+  );
+}
+
+function GameEvalGraph({ points }: { points: GameReportModel["graph"] }) {
+  const width = 320;
+  const height = 104;
+  const maxPly = Math.max(1, points[points.length - 1]?.ply || 1);
+  const path = points.map((point, index) => {
+    const x = (point.ply / maxPly) * width;
+    const y = 52 - Math.max(-1, Math.min(1, point.evalCp / 600)) * 42;
+    return `${index === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return (
+    <div className="game-eval-graph">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Evaluation graph">
+        <line x1="0" y1="52" x2={width} y2="52" />
+        <path d={path} />
+        {points.filter(point => point.quality && isTrainableQuality(point.quality)).map(point => {
+          const x = (point.ply / maxPly) * width;
+          const y = 52 - Math.max(-1, Math.min(1, point.evalCp / 600)) * 42;
+          return <circle key={`${point.ply}-${point.label}`} cx={x} cy={y} r="3.5" />;
+        })}
+      </svg>
+    </div>
   );
 }
 

@@ -3039,6 +3039,489 @@ textarea {
   text-transform: uppercase;
 }
 
+.intelligent-dashboard {
+  display: grid;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.dashboard-command-card,
+.dashboard-quality-card,
+.dashboard-insight-card,
+.dashboard-lens-card,
+.dashboard-games-card,
+.game-report-panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-card) 92%, white 8%);
+}
+
+.dashboard-command-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  background:
+    linear-gradient(135deg, rgba(183,226,107,0.14), rgba(255,255,255,0.025) 56%),
+    color-mix(in srgb, var(--bg-card) 90%, white 10%);
+}
+
+.dashboard-command-card h2 {
+  margin: 4px 0 6px;
+  color: var(--text-primary);
+  font-size: 1.65rem;
+  line-height: 1.04;
+}
+
+.dashboard-command-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.42;
+}
+
+.dashboard-command-actions,
+.dashboard-kpi-grid,
+.dashboard-focus-grid,
+.game-report-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dashboard-kpi-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.dashboard-kpi {
+  min-height: 86px;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+
+.dashboard-kpi span,
+.dashboard-section-title span,
+.strength-row span,
+.game-stats-column > span {
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.dashboard-kpi strong {
+  color: var(--text-primary);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.dashboard-kpi small {
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  line-height: 1.25;
+}
+
+.dashboard-kpi.good strong { color: var(--accent); }
+.dashboard-kpi.bad strong { color: var(--bad); }
+
+.dashboard-quality-card,
+.dashboard-insight-card,
+.dashboard-lens-card,
+.dashboard-games-card,
+.game-report-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.dashboard-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dashboard-section-title strong {
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: capitalize;
+}
+
+.quality-stack {
+  height: 16px;
+  display: flex;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #080a07;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
+}
+
+.quality-stack span { min-width: 4px; height: 100%; }
+.quality-stack .blunders { background: #e64f4f; }
+.quality-stack .mistakes { background: #e0a83b; }
+.quality-stack .good { background: #6f8f58; }
+.quality-stack .excellent { background: var(--accent); }
+
+.quality-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.quality-mini-grid button {
+  min-height: 54px;
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-primary);
+  padding: 8px;
+}
+
+.quality-mini-grid span {
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.quality-mini-grid strong {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 1rem;
+}
+
+.strength-row {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 34px;
+}
+
+.strength-row strong {
+  color: var(--text-primary);
+  font-size: 0.92rem;
+  line-height: 1.15;
+}
+
+.strength-row.good strong { color: var(--accent); }
+.strength-row.bad strong { color: #ffb36b; }
+
+.dashboard-lens-card .universal-board-frame {
+  width: 100%;
+}
+
+.dashboard-position-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.dashboard-position-row span {
+  color: var(--text-muted);
+  font-size: 0.64rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.dashboard-position-row strong {
+  font-family: "JetBrains Mono", monospace;
+}
+
+.dashboard-position-row b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.dashboard-game-list {
+  display: grid;
+  gap: 8px;
+}
+
+.dashboard-game-list button {
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-primary);
+  padding: 10px;
+  text-align: left;
+}
+
+.dashboard-game-list strong,
+.dashboard-game-list span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-game-list span {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.dashboard-game-list b {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(230,79,79,0.12);
+  color: var(--bad);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.82rem;
+}
+
+.dashboard-games-card small {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.games-library-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.games-library-head h2 {
+  margin: 3px 0 0;
+  color: var(--text-primary);
+  font-size: 1.75rem;
+}
+
+.games-library-head strong {
+  color: var(--accent);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 1.8rem;
+}
+
+.game-player-strip {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.game-player-strip div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.game-player-strip div.active {
+  border-color: rgba(183,226,107,0.52);
+}
+
+.game-player-strip span {
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.game-player-strip strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.game-player-strip b {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.game-replay-controls {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 42px 42px minmax(0, 1fr) 42px 42px;
+  gap: 8px;
+  align-items: center;
+}
+
+.game-replay-controls button {
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-primary);
+}
+
+.game-replay-controls span {
+  color: var(--text-secondary);
+  text-align: center;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.selected-move-panel.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: center;
+}
+
+.selected-move-panel.compact .ghost-button {
+  grid-column: 1 / -1;
+}
+
+.game-move-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 7px;
+  max-height: 210px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-card) 92%, white 8%);
+}
+
+.game-move-strip button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 999px;
+  background: #050604;
+  color: var(--text-secondary);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.game-move-strip button.user-move {
+  color: var(--text-primary);
+}
+
+.game-move-strip button.active {
+  border-color: rgba(232,225,198,0.68);
+  color: var(--text-primary);
+  background: #11140f;
+}
+
+.game-move-strip button.blunder { border-color: rgba(230,79,79,0.48); }
+.game-move-strip button.mistake,
+.game-move-strip button.inaccuracy { border-color: rgba(224,168,59,0.44); }
+.game-move-strip button.miss { border-color: rgba(240,139,95,0.48); }
+
+.game-report-panel {
+  gap: 12px;
+}
+
+.game-eval-graph {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #070906;
+}
+
+.game-eval-graph svg {
+  display: block;
+  width: 100%;
+  height: 112px;
+}
+
+.game-eval-graph line {
+  stroke: rgba(255,255,255,0.14);
+  stroke-width: 1;
+}
+
+.game-eval-graph path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.game-eval-graph circle {
+  fill: var(--bad);
+  stroke: #070906;
+  stroke-width: 1.5;
+}
+
+.game-stats-column {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.game-stats-column > strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.game-stats-column dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.game-stats-column dl div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.game-stats-column dt {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.game-stats-column dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
 @media (min-width: 431px) {
   body {
     display: grid;
