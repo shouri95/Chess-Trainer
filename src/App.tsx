@@ -31,6 +31,8 @@ const PROFILE_STORAGE_KEY = "pattern-coach-profile";
 const REPORT_STORAGE_KEY = "pattern-coach-report";
 const SYNC_META_STORAGE_KEY = "pattern-coach-sync-meta";
 const BACKGROUND_ENGINE_REVIEW_LIMIT = 36;
+const BACKGROUND_SYNC_INTERVAL_MS = 30_000;
+const LATEST_SYNC_MONTHS = 2;
 type ReviewBucket = "blunder" | "miss" | "mistake" | "good" | "best";
 type TrainableReviewBucket = "blunder" | "miss" | "mistake";
 
@@ -71,6 +73,15 @@ function loadSavedReport() {
   }
 }
 
+function findMatchingIssue(report: AnalysisReport, issue: MoveIssue | null) {
+  if (!issue) return null;
+  return report.issues.find(next =>
+    next.fenBefore === issue.fenBefore &&
+    next.uci === issue.uci &&
+    next.san === issue.san
+  ) ?? null;
+}
+
 export default function App() {
   const [username, setUsername] = useState("");
   const [months, setMonths] = useState(3);
@@ -98,6 +109,7 @@ export default function App() {
   const { evaluatePosition, analyzeMovePair } = useStockfish();
   const analysisAbortRef = useRef<AbortController | null>(null);
   const autoSyncRef = useRef("");
+  const syncInFlightRef = useRef(false);
 
   const openAnalysis = (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => {
     if (!fen) return;
@@ -218,6 +230,28 @@ export default function App() {
     runChessComImport({ keepCurrentReport: Boolean(report), silent: Boolean(report) });
   }, [profileHydrated, username, months, gameLimit, timeClass]);
 
+  useEffect(() => {
+    const syncUser = username.trim().toLowerCase();
+    if (!profileHydrated || !report || !syncUser || isPlaceholderUsername(syncUser)) return;
+    const syncLatest = () => runChessComImport({ keepCurrentReport: true, silent: true });
+    const timer = window.setInterval(() => {
+      syncLatest();
+    }, BACKGROUND_SYNC_INTERVAL_MS);
+
+    const syncOnVisible = () => {
+      if (document.visibilityState === "visible") syncLatest();
+    };
+    window.addEventListener("focus", syncLatest);
+    window.addEventListener("online", syncLatest);
+    document.addEventListener("visibilitychange", syncOnVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", syncLatest);
+      window.removeEventListener("online", syncLatest);
+      document.removeEventListener("visibilitychange", syncOnVisible);
+    };
+  }, [profileHydrated, report, username, months, gameLimit, timeClass]);
+
   const topPhase = useMemo<Phase>(() => {
     if (!report) return "opening";
     return ((Object.entries(report.phaseTotals) as [Phase, number][]).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "opening") as Phase;
@@ -232,10 +266,17 @@ export default function App() {
   }, [selectedIssue]);
 
   async function runChessComImport(options: { keepCurrentReport?: boolean; silent?: boolean; usernameOverride?: string } = {}) {
-    setError("");
+    if (syncInFlightRef.current) {
+      if (!options.silent) {
+        setSyncMeta({ status: "syncing", source: "chesscom", message: "Sync already running" });
+      }
+      return;
+    }
+    syncInFlightRef.current = true;
+    if (!options.silent) setError("");
     if (!options.silent) setLoading(true);
-    setProgress(null);
-    setSyncMeta({ status: "syncing", source: "chesscom", message: "Syncing Chess.com games" });
+    if (!options.silent) setProgress(null);
+    setSyncMeta({ status: "syncing", source: "chesscom", message: options.silent ? "Checking latest Chess.com games" : "Syncing Chess.com games" });
     analysisAbortRef.current?.abort();
     const controller = new AbortController();
     analysisAbortRef.current = controller;
@@ -244,8 +285,8 @@ export default function App() {
       const syncUsername = options.usernameOverride || username;
       const currentReport = report;
       const isLatestRefresh = Boolean(options.keepCurrentReport && currentReport);
-      const syncMonths = isLatestRefresh ? 1 : months;
-      const syncLimit = isLatestRefresh ? Math.max(gameLimit, 50) : gameLimit;
+      const syncMonths = isLatestRefresh ? Math.min(Math.max(months, LATEST_SYNC_MONTHS), 3) : months;
+      const syncLimit = isLatestRefresh ? Math.max(gameLimit, 120) : gameLimit;
       const games = await fetchChessComGames(syncUsername, syncMonths, timeClass, progressHandler, syncLimit);
       const knownUrls = new Set((isLatestRefresh ? currentReport?.gameSummaries ?? [] : []).map(game => game.url).filter(Boolean));
       const newGames = isLatestRefresh ? games.filter(game => !game.url || !knownUrls.has(game.url)) : games;
@@ -273,12 +314,16 @@ export default function App() {
         }, controller.signal)
         : await analyzeGamesInWorker({ kind: "chesscom", username: syncUsername, games: gamesForAnalysis }, controller.signal);
       setReport(nextReport);
-      setSelectedIssue(nextReport.summaries[0]?.examples[0] ?? null);
-      setQualityFilter("all");
-      setSelectedPatternId("all");
-      setSelectedGameId(-1);
-      setActiveView("dashboard");
-      setProfileOpen(false);
+      if (options.silent && isLatestRefresh) {
+        setSelectedIssue(current => findMatchingIssue(nextReport, current) ?? current ?? nextReport.summaries[0]?.examples[0] ?? null);
+      } else {
+        setSelectedIssue(nextReport.summaries[0]?.examples[0] ?? null);
+        setQualityFilter("all");
+        setSelectedPatternId("all");
+        setSelectedGameId(-1);
+        setActiveView("dashboard");
+        setProfileOpen(false);
+      }
       setSyncMeta({
         status: "idle",
         source: "chesscom",
@@ -289,11 +334,12 @@ export default function App() {
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) {
         const message = err instanceof Error ? err.message : "The import failed.";
-        setError(message);
+        if (!options.silent) setError(message);
         setSyncMeta({ status: "error", source: "chesscom", message });
         if (!options.keepCurrentReport) setReport(null);
       }
     } finally {
+      syncInFlightRef.current = false;
       if (analysisAbortRef.current === controller) analysisAbortRef.current = null;
       if (!options.silent) setLoading(false);
       if (!options.silent) window.setTimeout(() => setProgress(null), 700);
@@ -1028,6 +1074,7 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
     const base = report.moveReviews
       .filter(review => timeFilter === "all" || review.timeClass === timeFilter)
       .filter(review => selectedPatternId === "all" || review.issueIds.includes(selectedPatternId as any))
+      .filter(review => isTrainableQuality(review.quality))
       .filter(review => review.issueIds.length);
     return {
       all: base.length,
@@ -1039,6 +1086,7 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
   const allReviews = useMemo(() => report.moveReviews
       .filter(review => timeFilter === "all" || review.timeClass === timeFilter)
       .filter(review => selectedPatternId === "all" || review.issueIds.includes(selectedPatternId as any))
+      .filter(review => isTrainableQuality(review.quality))
       .filter(review => qualityFilter === "all" || qualityBucket(review.quality) === qualityFilter)
       .filter(review => review.issueIds.length)
       .sort((a, b) => sortMode === "latest"
@@ -1233,6 +1281,7 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
   train: () => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => void;
 }) {
+  const sheetRef = useRef<HTMLDivElement>(null);
   const betterMove = review.engineBestMove || review.engineLines?.[0]?.bestMove || "";
   const bucket = qualityBucket(review.quality);
   const betterLabel = formatEngineUci(betterMove) || "Best line";
@@ -1263,6 +1312,12 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
     setLineIndex(0);
   }, [comparison, review.id]);
 
+  useEffect(() => {
+    setComparison("played");
+    setLineIndex(0);
+    sheetRef.current?.scrollTo({ top: 0 });
+  }, [review.id]);
+
   const activeLine = comparison === "played"
     ? buildMoveLine(review.fenBefore, [review.uci])
     : comparison === "better"
@@ -1279,7 +1334,7 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
   const boardLastMove = activeStep?.lastMove;
   return (
     <div className="mistake-sheet-backdrop" role="dialog" aria-modal="true" aria-label="Mistake details">
-      <div className="mistake-sheet">
+      <div className="mistake-sheet" ref={sheetRef}>
         <button className="sheet-grabber" onClick={close} aria-label="Close mistake details" />
         <div className="sheet-title-row">
           <div>
@@ -1346,9 +1401,9 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
         />
 
         <div className="sheet-actions">
-          {prev && <button className="ghost-button" onClick={prev}><ChevronLeft size={16} /> Prev</button>}
+          {prev && <button className="ghost-button" onClick={() => { blurActiveElement(); prev(); }}><ChevronLeft size={16} /> Prev</button>}
           <button className="primary-button" onClick={train}><Sword size={16} /> Train</button>
-          {next && <button className="ghost-button" onClick={next}>Next <ChevronRight size={16} /></button>}
+          {next && <button className="ghost-button" onClick={() => { blurActiveElement(); next(); }}>Next <ChevronRight size={16} /></button>}
         </div>
       </div>
     </div>
@@ -1394,11 +1449,16 @@ function buildMoveLine(fen: string, moves: string[]): MoveLineStep[] {
     const parts = board.fen().split(" ");
     const moveNumber = Number(parts[5] || "1");
     const turn = board.turn();
-    const played = board.move({
-      from: moveText.slice(0, 2),
-      to: moveText.slice(2, 4),
-      promotion: moveText[4] || "q",
-    });
+    let played;
+    try {
+      played = board.move({
+        from: moveText.slice(0, 2),
+        to: moveText.slice(2, 4),
+        promotion: moveText[4] || "q",
+      });
+    } catch {
+      break;
+    }
     if (!played) break;
     steps.push({
       label: `${moveNumber}. ${turn === "b" ? "..." : ""}${played.san}`,
@@ -1407,6 +1467,12 @@ function buildMoveLine(fen: string, moves: string[]): MoveLineStep[] {
     });
   }
   return steps;
+}
+
+function blurActiveElement() {
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.blur();
+  }
 }
 
 function MistakeDetail({ review, issue, game, back, next, prev, train, openAnalysis }: {

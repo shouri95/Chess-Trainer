@@ -1,4 +1,5 @@
 import type { ComponentProps, ReactNode } from "react";
+import { Search } from "lucide-react";
 import ChessBoard from "./ChessBoard";
 import type { EngineEvaluation } from "../engine/useStockfish";
 import { formatEval } from "./EngineReadout";
@@ -22,28 +23,34 @@ export default function BoardFrame({
   className = "",
   children,
   size = 760,
+  onAnalyze,
   ...boardProps
 }: BoardFrameProps) {
   const scoreCp = evalCp ?? evaluation?.evalCp;
   const scoreMate = mate ?? evaluation?.mate;
   return (
     <div className={`universal-board-frame ${className}`.trim()}>
-      <BoardEvalBar evalCp={scoreCp} mate={scoreMate} flipped={boardProps.flipped} label={evalLabel} />
+      <BoardEvalBar evalCp={scoreCp} mate={scoreMate} flipped={boardProps.flipped} label={evalLabel} onAnalyze={onAnalyze} />
       <ChessBoard {...boardProps} size={size} />
       {children}
     </div>
   );
 }
 
-export function BoardEvalBar({ evalCp, mate, flipped = false, label }: { evalCp?: number; mate?: number; flipped?: boolean; label?: string }) {
+export function BoardEvalBar({ evalCp, mate, flipped = false, label, onAnalyze }: { evalCp?: number; mate?: number; flipped?: boolean; label?: string; onAnalyze?: () => void }) {
   const whitePct = evalToWhitePercent(evalCp, mate);
   const displayPct = flipped ? 100 - whitePct : whitePct;
   const display = label || formatEval(evalCp, mate) || "0.0";
   return (
-    <div className="universal-eval-bar" aria-label={`Evaluation ${display}`}>
+    <div className={`universal-eval-bar ${onAnalyze ? "has-action" : ""}`.trim()} aria-label={`Evaluation ${display}`}>
       <div className="universal-eval-track">
         <span style={{ width: `${displayPct}%` }} />
       </div>
+      {onAnalyze && (
+        <button type="button" className="universal-analyze-button" onClick={onAnalyze} aria-label="Analyze position">
+          <Search size={14} />
+        </button>
+      )}
       <strong>{display}</strong>
     </div>
   );

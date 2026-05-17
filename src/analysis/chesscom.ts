@@ -61,7 +61,7 @@ export async function fetchChessComProfile(username: string): Promise<ChessComPr
     throw new Error("Enter a Chess.com username first.");
   }
 
-  const response = await fetch(`https://api.chess.com/pub/player/${encodeURIComponent(user)}`);
+  const response = await fetch(`https://api.chess.com/pub/player/${encodeURIComponent(user)}`, { cache: "no-store" });
   if (response.status === 404) {
     throw new Error(`No public Chess.com profile was found for "${username}".`);
   }
@@ -85,7 +85,7 @@ export async function fetchChessComGames(
   }
 
   onProgress?.({ label: "Finding monthly archives", done: 0, total: 1 });
-  const archiveResponse = await fetch(`https://api.chess.com/pub/player/${encodeURIComponent(user)}/games/archives`);
+  const archiveResponse = await fetch(`https://api.chess.com/pub/player/${encodeURIComponent(user)}/games/archives`, { cache: "no-store" });
 
   if (archiveResponse.status === 404) {
     throw new Error(`No public Chess.com profile was found for "${username}".`);
@@ -107,7 +107,7 @@ export async function fetchChessComGames(
       const month = archiveUrl.split("/").slice(-2).join("/");
       onProgress?.({ label: `Importing ${month}`, done, total: selectedArchives.length });
 
-      const response = await fetch(archiveUrl);
+      const response = await fetch(archiveUrl, { cache: "no-store" });
       if (response.status === 429) {
         throw new Error("Chess.com rate-limited the import. Try fewer months or wait a minute.");
       }
