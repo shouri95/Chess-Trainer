@@ -1216,49 +1216,45 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
   const betterLabel = formatEngineUci(betterMove) || "Best line";
   const { evaluatePosition } = useStockfish();
   const [comparison, setComparison] = useState<"played" | "better" | "consequence">("played");
-  const [consequenceFen, setConsequenceFen] = useState(review.fenAfter);
-  const [consequenceMove, setConsequenceMove] = useState("");
+  const [lineIndex, setLineIndex] = useState(0);
+  const [consequenceMoves, setConsequenceMoves] = useState<string[]>([]);
   const [consequenceEval, setConsequenceEval] = useState<EngineEvaluation | null>(null);
+  const betterMoves = useMemo(() => {
+    const source = review.engineLines?.[0]?.pv || betterMove;
+    return source.split(" ").filter(Boolean).slice(0, 8);
+  }, [betterMove, review.engineLines]);
 
   useEffect(() => {
     if (comparison !== "consequence") return;
     let cancelled = false;
-    setConsequenceFen(review.fenAfter);
-    setConsequenceMove("");
+    setConsequenceMoves([]);
     setConsequenceEval(null);
     evaluatePosition(review.fenAfter, ENGINE_DEPTH).then(result => {
       if (cancelled) return;
       setConsequenceEval(result);
-      if (!result.bestMove) return;
-      const board = new Chess(review.fenAfter);
-      const reply = board.move({
-        from: result.bestMove.slice(0, 2),
-        to: result.bestMove.slice(2, 4),
-        promotion: result.bestMove[4] || "q",
-      });
-      if (!reply || cancelled) return;
-      setConsequenceMove(result.bestMove);
-      setConsequenceFen(board.fen());
+      setConsequenceMoves((result.pv || result.bestMove || "").split(" ").filter(Boolean).slice(0, 8));
     });
     return () => { cancelled = true; };
   }, [comparison, evaluatePosition, review.fenAfter]);
 
-  const playedArrow = { from: review.uci.slice(0, 2), to: review.uci.slice(2, 4), color: comparison === "played" ? "rgba(255,89,89,0.84)" : "rgba(255,89,89,0.30)" };
-  const betterArrow = betterMove ? { from: betterMove.slice(0, 2), to: betterMove.slice(2, 4), color: comparison === "better" ? "rgba(183,226,107,0.88)" : "rgba(183,226,107,0.32)" } : null;
-  const consequenceArrow = consequenceMove ? { from: consequenceMove.slice(0, 2), to: consequenceMove.slice(2, 4), color: "rgba(255,205,92,0.86)" } : null;
+  useEffect(() => {
+    setLineIndex(0);
+  }, [comparison, review.id]);
+
+  const activeLine = comparison === "played"
+    ? buildMoveLine(review.fenBefore, [review.uci])
+    : comparison === "better"
+      ? buildMoveLine(review.fenBefore, betterMoves)
+      : buildMoveLine(review.fenAfter, consequenceMoves);
+  const activeStep = activeLine[Math.min(lineIndex, Math.max(activeLine.length - 1, 0))];
   const boardEvalCp = comparison === "played"
     ? review.engineEvalAfter
     : comparison === "better"
       ? review.engineEvalBefore
       : consequenceEval?.evalCp ?? review.engineEvalAfter;
   const boardEvalMate = comparison === "consequence" ? consequenceEval?.mate : undefined;
-  const boardFen = comparison === "consequence" ? consequenceFen : review.fenBefore;
-  const boardLastMove = comparison === "consequence"
-    ? consequenceMove ? { from: consequenceMove.slice(0, 2), to: consequenceMove.slice(2, 4) } : { from: review.uci.slice(0, 2), to: review.uci.slice(2, 4) }
-    : undefined;
-  const boardArrows = comparison === "consequence"
-    ? [playedArrow, ...(consequenceArrow ? [consequenceArrow] : [])]
-    : [playedArrow, ...(betterArrow ? [betterArrow] : [])];
+  const boardFen = activeStep?.fen || review.fenBefore;
+  const boardLastMove = activeStep?.lastMove;
   return (
     <div className="mistake-sheet-backdrop" role="dialog" aria-modal="true" aria-label="Mistake details">
       <div className="mistake-sheet">
@@ -1266,12 +1262,13 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
         <div className="sheet-title-row">
           <div>
             <span className="eyebrow">{phaseLabels[review.phase]}</span>
-            <h2>{review.san}</h2>
+            <div className="sheet-move-title">
+              <h2>{review.san}</h2>
+              <span className={`tag ${bucket}`}>{qualityLabel(review.quality)}</span>
+            </div>
           </div>
           <span className="eval-swing large">{formatReviewSwing(review)}</span>
         </div>
-
-        <MistakeEvalSwing review={review} />
 
         <div className="mistake-visual-card">
           <BoardFrame
@@ -1280,7 +1277,6 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
             evalCp={boardEvalCp}
             mate={boardEvalMate}
             lastMove={boardLastMove}
-            arrows={boardArrows}
             size={760}
           />
           <div className="sheet-move-compare">
@@ -1313,20 +1309,18 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
               aria-label="Show consequence"
             >
               <span>Consequence</span>
-              <strong>{consequenceMove ? formatEngineUci(consequenceMove) : "Engine reply"}</strong>
+              <strong>{consequenceMoves[0] ? formatEngineUci(consequenceMoves[0]) : "Show line"}</strong>
             </button>
           </div>
         </div>
 
-        <div className="coach-why-card">
-          <span className={`tag ${bucket}`}>{qualityLabel(review.quality)}</span>
-          <strong>{issue.title}</strong>
-          <p>
-            {comparison === "consequence"
-              ? `${formatEngineUci(consequenceMove) || "The engine reply"} is the punishment after ${review.san}. The board is showing the consequence, not just explaining it.`
-              : coachMistakeCopy(review, issue, betterLabel)}
-          </p>
-        </div>
+        <MistakeLineCard
+          label={comparison === "played" ? "Your move" : comparison === "better" ? "Better line" : "Consequence line"}
+          steps={activeLine}
+          activeIndex={lineIndex}
+          setActiveIndex={setLineIndex}
+          fallback={comparison === "consequence" ? "Engine is building the punishment line." : issue.title}
+        />
 
         <div className="sheet-actions">
           {prev && <button className="ghost-button" onClick={prev}><ChevronLeft size={16} /> Prev</button>}
@@ -1339,27 +1333,58 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
   );
 }
 
-function MistakeEvalSwing({ review }: { review: MoveReview }) {
-  const before = typeof review.engineEvalBefore === "number" ? review.engineEvalBefore : undefined;
-  const after = typeof review.engineEvalAfter === "number" ? review.engineEvalAfter : undefined;
-  const beforePct = review.color === "black" ? 100 - evalToWhitePercent(before) : evalToWhitePercent(before);
-  const afterPct = review.color === "black" ? 100 - evalToWhitePercent(after) : evalToWhitePercent(after);
-  const beforeLabel = formatEngineEval(before) || "Before";
-  const afterLabel = formatEngineEval(after) || "After";
+type MoveLineStep = {
+  label: string;
+  fen: string;
+  lastMove: { from: string; to: string };
+};
+
+function MistakeLineCard({ label, steps, activeIndex, setActiveIndex, fallback }: {
+  label: string;
+  steps: MoveLineStep[];
+  activeIndex: number;
+  setActiveIndex: (index: number) => void;
+  fallback: string;
+}) {
   return (
-    <div className="mistake-eval-strip" aria-label={`Evaluation swing ${formatReviewSwing(review)}`}>
-      <div className="mistake-eval-labels">
-        <span>Before <strong>{beforeLabel}</strong></span>
-        <b>{formatReviewSwing(review)}</b>
-        <span>After <strong>{afterLabel}</strong></span>
-      </div>
-      <div className="mistake-eval-track">
-        <i className="before" style={{ left: `${beforePct}%` }} />
-        <i className="after" style={{ left: `${afterPct}%` }} />
-        <em style={{ left: `${Math.min(beforePct, afterPct)}%`, width: `${Math.max(4, Math.abs(beforePct - afterPct))}%` }} />
-      </div>
+    <div className="mistake-line-card" aria-label={label}>
+      {steps.length ? steps.map((step, index) => (
+        <button
+          key={`${step.label}-${index}`}
+          className={activeIndex === index ? "active" : ""}
+          onClick={() => setActiveIndex(index)}
+        >
+          {step.label}
+        </button>
+      )) : (
+        <span>{fallback}</span>
+      )}
     </div>
   );
+}
+
+function buildMoveLine(fen: string, moves: string[]): MoveLineStep[] {
+  const board = new Chess(fen);
+  const steps: MoveLineStep[] = [];
+  for (const rawMove of moves) {
+    const moveText = rawMove.trim();
+    if (!moveText) continue;
+    const parts = board.fen().split(" ");
+    const moveNumber = Number(parts[5] || "1");
+    const turn = board.turn();
+    const played = board.move({
+      from: moveText.slice(0, 2),
+      to: moveText.slice(2, 4),
+      promotion: moveText[4] || "q",
+    });
+    if (!played) break;
+    steps.push({
+      label: `${moveNumber}. ${turn === "b" ? "..." : ""}${played.san}`,
+      fen: board.fen(),
+      lastMove: { from: played.from, to: played.to },
+    });
+  }
+  return steps;
 }
 
 function MistakeDetail({ review, issue, game, back, next, prev, train, openAnalysis }: {
