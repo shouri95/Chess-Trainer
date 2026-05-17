@@ -15,20 +15,37 @@ export function judgeDrillMove({
   fen,
   uci,
   engine,
+  rejectedMove,
+  preferredMove,
+  problemExplanation,
 }: {
   fen: string;
   uci: string;
   engine: EngineEvaluation;
+  rejectedMove?: string;
+  preferredMove?: string;
+  problemExplanation?: string;
 }): DrillJudgement {
   const playedSan = sanForUciMove(fen, uci) || uci;
   const materialGain = materialGainForMove(fen, uci);
+  const bestMove = chooseBestMove(engine, rejectedMove, preferredMove);
 
-  const isEngineChoice = engine.bestMove && sameMove(engine.bestMove, uci);
-  const isCloseMaterialAlternative = materialGain >= 3 && isWithinEngineMargin(fen, uci, engine, 50);
+  if (rejectedMove && sameMove(rejectedMove, uci)) {
+    return {
+      status: "wrong",
+      bestMove,
+      playedSan,
+      message: problemExplanation || `${playedSan} was the move from your game. Find the improvement that avoids the original problem.`,
+      engineLine: engine.pv,
+    };
+  }
+
+  const isEngineChoice = bestMove && sameMove(bestMove, uci);
+  const isCloseMaterialAlternative = materialGain >= 3 && isWithinEngineMargin(fen, uci, engine, 50, rejectedMove);
   if (isCloseMaterialAlternative) {
     return {
       status: "correct",
-      bestMove: engine.bestMove || uci,
+      bestMove: bestMove || uci,
       playedSan,
       message: `${playedSan} wins material and stays close to the engine's preferred line.`,
       engineLine: engine.pv,
@@ -38,7 +55,7 @@ export function judgeDrillMove({
   if (isEngineChoice) {
     return {
       status: "correct",
-      bestMove: engine.bestMove,
+      bestMove,
       playedSan,
       message: "That matches the engine's preferred move from this mistake position.",
       engineLine: engine.pv,
@@ -47,13 +64,20 @@ export function judgeDrillMove({
 
   return {
     status: "wrong",
-    bestMove: engine.bestMove,
+    bestMove,
     playedSan,
-    message: engine.bestMove
+    message: bestMove
       ? "This is playable only if it solves the concrete threat; the engine prefers another move here."
       : "I could not get a reliable engine recommendation for this position.",
     engineLine: engine.pv,
   };
+}
+
+function chooseBestMove(engine: EngineEvaluation, rejectedMove?: string, preferredMove?: string) {
+  if (preferredMove && (!rejectedMove || !sameMove(preferredMove, rejectedMove))) return preferredMove;
+  if (engine.bestMove && (!rejectedMove || !sameMove(engine.bestMove, rejectedMove))) return engine.bestMove;
+  const alternate = engine.lines?.find(line => line.bestMove && (!rejectedMove || !sameMove(line.bestMove, rejectedMove)));
+  return alternate?.bestMove || engine.bestMove || preferredMove || "";
 }
 
 function sameMove(a: string, b: string) {
@@ -68,10 +92,13 @@ function normalizeUci(move: string) {
   return match?.[1] || "";
 }
 
-function isWithinEngineMargin(fen: string, uci: string, engine: EngineEvaluation, marginCp: number) {
+function isWithinEngineMargin(fen: string, uci: string, engine: EngineEvaluation, marginCp: number, rejectedMove?: string) {
   if (!engine.bestMove || sameMove(engine.bestMove, uci)) return true;
+  if (rejectedMove && sameMove(rejectedMove, uci)) return false;
   const playedLine = engine.lines?.find(line => sameMove(line.bestMove, uci));
-  const bestLine = engine.lines?.find(line => sameMove(line.bestMove, engine.bestMove)) ?? engine.lines?.[0];
+  const bestLine = engine.lines?.find(line => line.bestMove && (!rejectedMove || !sameMove(line.bestMove, rejectedMove))) ??
+    engine.lines?.find(line => sameMove(line.bestMove, engine.bestMove)) ??
+    engine.lines?.[0];
   if (!playedLine || !bestLine) return false;
   const color = fen.split(" ")[1] === "b" ? "b" : "w";
   const bestScore = scoreForColor(bestLine, color);

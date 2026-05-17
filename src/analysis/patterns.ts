@@ -26,6 +26,9 @@ type MoveIssue = {
   opponent?: string;
   color: "white" | "black";
   opening?: string;
+  engineBestMove?: string;
+  engineEvalLoss?: number;
+  engineReviewed?: boolean;
 };
 
 type PatternSummary = {

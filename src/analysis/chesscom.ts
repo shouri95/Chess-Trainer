@@ -76,7 +76,8 @@ export async function fetchChessComGames(
   username: string,
   monthLimit: number,
   timeClass: "all" | "rapid" | "blitz" | "bullet" | "daily",
-  onProgress?: (progress: ImportProgress) => void
+  onProgress?: (progress: ImportProgress) => void,
+  maxGames = Infinity,
 ) {
   const user = cleanUsername(username);
   if (!user) {
@@ -99,9 +100,10 @@ export async function fetchChessComGames(
   const games: ChessComGame[] = [];
   let done = 0;
 
-  for (let batchStart = 0; batchStart < selectedArchives.length; batchStart += 4) {
-    const batch = selectedArchives.slice(batchStart, batchStart + 4);
+  for (let batchStart = 0; batchStart < selectedArchives.length && games.length < maxGames; batchStart += 3) {
+    const batch = selectedArchives.slice(batchStart, batchStart + 3);
     await Promise.all(batch.map(async (archiveUrl) => {
+      if (games.length >= maxGames) return;
       const month = archiveUrl.split("/").slice(-2).join("/");
       onProgress?.({ label: `Importing ${month}`, done, total: selectedArchives.length });
 
@@ -114,14 +116,17 @@ export async function fetchChessComGames(
       }
 
       const data = (await response.json()) as GamesResponse;
-      games.push(
-        ...data.games.filter((game) => {
+      const matchingGames = data.games.filter((game) => {
           const isStandardChess = !game.rules || game.rules === "chess";
           const hasPgn = Boolean(game.pgn);
           const matchesTimeClass = timeClass === "all" || game.time_class === timeClass;
           return isStandardChess && hasPgn && matchesTimeClass;
-        })
-      );
+        });
+      games.push(...matchingGames);
+      if (games.length > maxGames) {
+        games.sort((a, b) => (b.end_time ?? 0) - (a.end_time ?? 0));
+        games.length = maxGames;
+      }
       done += 1;
       onProgress?.({ label: `Imported ${month}`, done, total: selectedArchives.length });
     }));

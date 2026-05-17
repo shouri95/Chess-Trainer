@@ -1,32 +1,36 @@
 import { Component, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import {
-  ArrowLeft, BarChart3, Brain, ChevronLeft, ChevronRight,
+  Activity, ArrowLeft, BarChart3, Brain, ChevronLeft, ChevronRight,
   Crown, Dumbbell, FileUp, LoaderCircle, Search, Shield,
   Swords, Target, TrendingUp, Zap, Menu, LayoutGrid, Skull, Sword, BookOpen, AlertTriangle, CheckCircle2,
   User, X, RefreshCw, Link2, Clock3, Repeat2
 } from "lucide-react";
 import { fetchChessComGames, fetchChessComProfile, ImportProgress } from "./analysis/chesscom";
-import type { AnalysisReport, GameSummary, MoveIssue, MoveReview, MoveReviewQuality, PatternSummary, Phase, SkillDimension } from "./analysis/patterns";
+import type { AnalysisReport, GameSummary, MoveIssue, MoveReview, MoveReviewQuality, PatternSummary, Phase, SkillDimension, TrainingRecommendation } from "./analysis/patterns";
 import ChessBoard from "./components/ChessBoard";
 import DrillPanel from "./components/DrillPanel";
 import EngineReadout, { formatEval as formatEngineEval, formatUci as formatEngineUci } from "./components/EngineReadout";
 import { EngineEvaluation, useStockfish } from "./engine/useStockfish";
 import { classifyMoveQuality, DEFAULT_ENGINE_DEPTH, DEFAULT_ENGINE_MULTIPV, type MoveEngineResult } from "./engine/EngineService";
+import { isPlaceholderUsername, normalizeStoredProfile, shouldAutoSyncProfile } from "./appPersistence";
 
 const samplePgn = `[Event "Training sample"]
 [Site "https://www.chess.com/game/live/sample"]
 [Date "2026.05.13"]
-[White "You"]
+[White "Sample"]
 [Black "CoachBot"]
 [Result "0-1"]
 
-1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. Nc3 Nf6 5. d3 O-O 6. Bg5 h6 7. Bh4 g5
-8. Bg3 d6 9. Qd2 Bg4 10. Nxg5 hxg5 11. Qxg5+ Kh7 12. Bh4 Rg8 13. Qd2 Nd4 14. O-O Nf3+ 0-1`;
+1. e4 e5 2. Qh5 Nf6 3. Bc4 Nxh5 0-1`;
 
 const phaseLabels: Record<Phase, string> = { opening: "Opening", middlegame: "Middlegame", endgame: "Endgame" };
 const phases: Phase[] = ["opening", "middlegame", "endgame"];
 const ENGINE_DEPTH = DEFAULT_ENGINE_DEPTH;
+const PROFILE_STORAGE_KEY = "pattern-coach-profile";
+const REPORT_STORAGE_KEY = "pattern-coach-report";
+const SYNC_META_STORAGE_KEY = "pattern-coach-sync-meta";
+const BACKGROUND_ENGINE_REVIEW_LIMIT = 36;
 type ReviewBucket = "blunder" | "miss" | "mistake" | "good" | "best";
 type TrainableReviewBucket = "blunder" | "miss" | "mistake";
 
@@ -35,6 +39,13 @@ type AnalysisStart = {
   flipped?: boolean;
   title?: string;
   gamePgn?: string;
+};
+
+type SyncMeta = {
+  lastSyncedAt?: number;
+  source?: "chesscom" | "pgn" | "sample";
+  status?: "idle" | "syncing" | "error";
+  message?: string;
 };
 
 const dimensionLabels: Record<SkillDimension, string> = {
@@ -47,6 +58,18 @@ const dimensionLabels: Record<SkillDimension, string> = {
   coordination: "Pieces",
   conversion: "Conversion",
 };
+
+function loadSavedReport() {
+  const saved = localStorage.getItem(REPORT_STORAGE_KEY);
+  if (!saved) return null;
+  try {
+    const parsed = JSON.parse(saved) as { report?: AnalysisReport };
+    return parsed.report ?? null;
+  } catch {
+    localStorage.removeItem(REPORT_STORAGE_KEY);
+    return null;
+  }
+}
 
 export default function App() {
   const [username, setUsername] = useState("");
@@ -69,8 +92,12 @@ export default function App() {
   const [drillLaunchKey, setDrillLaunchKey] = useState(0);
   const [activeMistakeReviewId, setActiveMistakeReviewId] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [profileHydrated, setProfileHydrated] = useState(false);
+  const [syncMeta, setSyncMeta] = useState<SyncMeta>({ status: "idle" });
   const { evaluatePosition, analyzeMovePair } = useStockfish();
   const analysisAbortRef = useRef<AbortController | null>(null);
+  const autoSyncRef = useRef("");
 
   const openAnalysis = (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => {
     if (!fen) return;
@@ -80,22 +107,52 @@ export default function App() {
   };
 
   useEffect(() => {
-    const saved = localStorage.getItem("pattern-coach-profile");
-    if (!saved) return;
+    const saved = localStorage.getItem(PROFILE_STORAGE_KEY);
+    const savedReport = loadSavedReport();
     try {
-      const parsed = JSON.parse(saved) as { username?: string; months?: number; gameLimit?: number; timeClass?: typeof timeClass };
-      if (parsed.username) setUsername(parsed.username);
-      if (parsed.months) setMonths(Math.min(parsed.months, 12));
-      if (parsed.gameLimit) setGameLimit(Math.min(parsed.gameLimit, 500));
-      if (parsed.timeClass) setTimeClass(parsed.timeClass);
+      if (saved) {
+        const parsed = normalizeStoredProfile(JSON.parse(saved));
+        if (parsed.username) setUsername(parsed.username);
+        if (parsed.months) setMonths(parsed.months);
+        if (parsed.gameLimit) setGameLimit(parsed.gameLimit);
+        if (parsed.timeClass) setTimeClass(parsed.timeClass);
+      }
+      if (savedReport) {
+        setReport(savedReport);
+        setSelectedIssue(savedReport.summaries[0]?.examples[0] ?? null);
+      }
+      const savedSync = localStorage.getItem(SYNC_META_STORAGE_KEY);
+      if (savedSync) setSyncMeta(JSON.parse(savedSync) as SyncMeta);
     } catch {
-      localStorage.removeItem("pattern-coach-profile");
+      localStorage.removeItem(PROFILE_STORAGE_KEY);
+      localStorage.removeItem(SYNC_META_STORAGE_KEY);
+    } finally {
+      setProfileHydrated(true);
     }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("pattern-coach-profile", JSON.stringify({ username, months, gameLimit, timeClass }));
+    if (!profileHydrated) return;
+    if (username && !isPlaceholderUsername(username)) {
+      localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ username, months, gameLimit, timeClass }));
+    } else {
+      localStorage.removeItem(PROFILE_STORAGE_KEY);
+    }
   }, [username, months, gameLimit, timeClass]);
+
+  useEffect(() => {
+    if (!profileHydrated) return;
+    localStorage.setItem(SYNC_META_STORAGE_KEY, JSON.stringify(syncMeta));
+  }, [profileHydrated, syncMeta]);
+
+  useEffect(() => {
+    if (!profileHydrated) return;
+    if (report) {
+      localStorage.setItem(REPORT_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), report }));
+    } else {
+      localStorage.removeItem(REPORT_STORAGE_KEY);
+    }
+  }, [profileHydrated, report]);
 
   useEffect(() => {
     return () => analysisAbortRef.current?.abort();
@@ -104,14 +161,14 @@ export default function App() {
   useEffect(() => {
     if (!report) return;
     const candidates = report.moveReviews
-      .filter(review => !review.engineReviewed)
+      .filter(review => !review.engineReviewed && review.issueIds.length && isTrainableQuality(review.quality))
       .sort((a, b) => (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId));
     if (!candidates.length) return;
     let cancelled = false;
 
     async function refineFlaggedMoves() {
       const updates = new Map<string, MoveReview>();
-      for (const review of candidates) {
+      for (const review of candidates.slice(0, BACKGROUND_ENGINE_REVIEW_LIMIT)) {
         if (cancelled) return;
         try {
           const engine = await analyzeMovePair({
@@ -134,7 +191,15 @@ export default function App() {
           moveReviews: current.moveReviews.map(review => updates.get(review.id) || review),
           issues: addEngineIssues(current.issues.map(issue => {
             const update = [...updates.values()].find(review => review.fenBefore === issue.fenBefore && review.san === issue.san);
-            return update ? { ...issue, quality: update.quality } : issue;
+            return update ? {
+              ...issue,
+              quality: update.quality,
+              severity: update.severity,
+              explanation: update.explanation,
+              engineBestMove: update.engineBestMove,
+              engineEvalLoss: update.engineEvalLoss,
+              engineReviewed: true,
+            } : issue;
           }), updates),
         };
       });
@@ -143,6 +208,15 @@ export default function App() {
     refineFlaggedMoves();
     return () => { cancelled = true; };
   }, [report, analyzeMovePair]);
+
+  useEffect(() => {
+    const syncUser = username.trim().toLowerCase();
+    if (!profileHydrated || !shouldAutoSyncProfile(syncUser, loading)) return;
+    const key = `${syncUser}:${months}:${gameLimit}:${timeClass}`;
+    if (autoSyncRef.current === key) return;
+    autoSyncRef.current = key;
+    runChessComImport({ keepCurrentReport: Boolean(report), silent: Boolean(report) });
+  }, [profileHydrated, username, months, gameLimit, timeClass]);
 
   const topPhase = useMemo<Phase>(() => {
     if (!report) return "opening";
@@ -157,19 +231,22 @@ export default function App() {
     return h;
   }, [selectedIssue]);
 
-  async function runChessComImport() {
-    setError(""); setLoading(true); setProgress(null);
+  async function runChessComImport(options: { keepCurrentReport?: boolean; silent?: boolean; usernameOverride?: string } = {}) {
+    setError(""); setLoading(true); setProgress(options.silent ? null : null);
+    setSyncMeta({ status: "syncing", source: "chesscom", message: "Syncing Chess.com games" });
     analysisAbortRef.current?.abort();
     const controller = new AbortController();
     analysisAbortRef.current = controller;
     try {
-      const games = await fetchChessComGames(username, months, timeClass, setProgress);
+      const progressHandler = options.silent ? undefined : setProgress;
+      const syncUsername = options.usernameOverride || username;
+      const games = await fetchChessComGames(syncUsername, months, timeClass, progressHandler, gameLimit);
       const gamesForAnalysis = games
         .slice()
         .sort((a, b) => (a.end_time ?? 0) - (b.end_time ?? 0))
         .slice(-gameLimit);
-      setProgress({ label: `Analyzing ${gamesForAnalysis.length} games`, done: 1, total: 1 });
-      const nextReport = await analyzeGamesInWorker({ kind: "chesscom", username, games: gamesForAnalysis }, controller.signal);
+      progressHandler?.({ label: `Analyzing ${gamesForAnalysis.length} games`, done: 1, total: 1 });
+      const nextReport = await analyzeGamesInWorker({ kind: "chesscom", username: syncUsername, games: gamesForAnalysis }, controller.signal);
       setReport(nextReport);
       setSelectedIssue(nextReport.summaries[0]?.examples[0] ?? null);
       setQualityFilter("all");
@@ -177,14 +254,24 @@ export default function App() {
       setSelectedGameId(-1);
       setActiveView("dashboard");
       setProfileOpen(false);
+      setSyncMeta({
+        status: "idle",
+        source: "chesscom",
+        lastSyncedAt: Date.now(),
+        message: `Synced ${nextReport.games} games`,
+      });
       if (!nextReport.games) setError("No standard chess games matched that username and filter.");
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) {
-        setError(err instanceof Error ? err.message : "The import failed.");
+        const message = err instanceof Error ? err.message : "The import failed.";
+        setError(message);
+        setSyncMeta({ status: "error", source: "chesscom", message });
+        if (!options.keepCurrentReport) setReport(null);
       }
     } finally {
       if (analysisAbortRef.current === controller) analysisAbortRef.current = null;
       setLoading(false);
+      if (!options.silent) window.setTimeout(() => setProgress(null), 700);
     }
   }
 
@@ -194,9 +281,11 @@ export default function App() {
     setProgress({ label: "Connecting Chess.com profile", done: 0, total: 1 });
     try {
       const profile = await fetchChessComProfile(username);
-      setUsername(profile.username || username.trim());
+      const canonicalUsername = profile.username || username.trim();
+      setUsername(canonicalUsername);
       setProgress({ label: "Profile connected", done: 1, total: 1 });
       setProfileOpen(false);
+      setSyncMeta({ status: "idle", source: "chesscom", message: "Profile connected" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not connect that Chess.com profile.");
     } finally {
@@ -219,6 +308,12 @@ export default function App() {
       setSelectedGameId(-1);
       setActiveView("dashboard");
       setProfileOpen(false);
+      setSyncMeta({
+        status: "idle",
+        source: usernameOverride === "Sample" ? "sample" : "pgn",
+        lastSyncedAt: Date.now(),
+        message: usernameOverride === "Sample" ? "Sample report loaded" : "PGN report loaded",
+      });
       if (!nextReport.games) setError("No games were found in that PGN.");
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) {
@@ -231,12 +326,31 @@ export default function App() {
     }
   }
 
+  async function runFirstRunConnect() {
+    setError("");
+    setLoading(true);
+    setProgress({ label: "Connecting Chess.com profile", done: 0, total: 1 });
+    try {
+      const profile = await fetchChessComProfile(username);
+      const canonicalUsername = profile.username || username.trim();
+      setUsername(canonicalUsername);
+      setProgress({ label: "Profile connected", done: 1, total: 2 });
+      setLoading(false);
+      await runChessComImport({ usernameOverride: canonicalUsername });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not connect that Chess.com profile.");
+      setSyncMeta({ status: "error", source: "chesscom", message: err instanceof Error ? err.message : "Could not connect that Chess.com profile." });
+      setLoading(false);
+      window.setTimeout(() => setProgress(null), 700);
+    }
+  }
+
   return (
     <ErrorBoundary>
     <main className="app-shell">
       <section className={`workspace view-${activeView}`}>
         <header className="topbar">
-          <button className="icon-button"><Menu size={21} /></button>
+          <button className="icon-button" onClick={() => setMenuOpen(true)} aria-label="Open app menu"><Menu size={21} /></button>
           <div className="brand-lockup">
             <h1>Pattern Coach</h1>
           </div>
@@ -272,6 +386,7 @@ export default function App() {
                   setDrillLaunchKey(key => key + 1);
                   setActiveView("drill");
                 }}
+                syncMeta={syncMeta}
               />
             )}
             {activeView === "games" && (
@@ -333,12 +448,42 @@ export default function App() {
             )}
           </>
         ) : (
-          <ConnectedDashboard
+          <FirstRunLogin
             username={username}
+            setUsername={setUsername}
             loading={loading}
             openProfile={() => setProfileOpen(true)}
-            syncGames={runChessComImport}
-            loadSample={() => { setUsername("You"); setPgnText(samplePgn); runPgnAnalysis(samplePgn, "You"); }}
+            connectAndSync={runFirstRunConnect}
+            loadSample={() => { setPgnText(samplePgn); runPgnAnalysis(samplePgn, "Sample"); }}
+            error={error}
+          />
+        )}
+
+        {menuOpen && (
+          <AppMenu
+            report={report}
+            username={username}
+            syncMeta={syncMeta}
+            loading={loading}
+            close={() => setMenuOpen(false)}
+            openProfile={() => {
+              setMenuOpen(false);
+              setProfileOpen(true);
+            }}
+            syncGames={() => {
+              setMenuOpen(false);
+              runChessComImport({ keepCurrentReport: Boolean(report) });
+            }}
+            clearData={() => {
+              localStorage.removeItem(PROFILE_STORAGE_KEY);
+              localStorage.removeItem(REPORT_STORAGE_KEY);
+              localStorage.removeItem(SYNC_META_STORAGE_KEY);
+              setUsername("");
+              setReport(null);
+              setSyncMeta({ status: "idle" });
+              setSelectedIssue(null);
+              setMenuOpen(false);
+            }}
           />
         )}
 
@@ -356,9 +501,18 @@ export default function App() {
             setPgnText={setPgnText}
             loading={loading}
             runChessComConnect={runChessComConnect}
-            runChessComImport={runChessComImport}
+            runChessComImport={() => runChessComImport()}
             runPgnAnalysis={runPgnAnalysis}
-            loadSample={() => { setUsername("You"); setPgnText(samplePgn); runPgnAnalysis(samplePgn, "You"); }}
+            loadSample={() => { setPgnText(samplePgn); runPgnAnalysis(samplePgn, "Sample"); }}
+            forgetProfile={() => {
+              localStorage.removeItem(PROFILE_STORAGE_KEY);
+              localStorage.removeItem(REPORT_STORAGE_KEY);
+              localStorage.removeItem(SYNC_META_STORAGE_KEY);
+              setUsername("");
+              setReport(null);
+              setSyncMeta({ status: "idle" });
+              setProfileOpen(false);
+            }}
             close={() => setProfileOpen(false)}
           />
         )}
@@ -468,58 +622,104 @@ function analyzeGamesInWorker(payload: WorkerPayload, signal?: AbortSignal) {
   });
 }
 
-function ConnectedDashboard({ username, loading, openProfile, syncGames, loadSample }: {
+function FirstRunLogin({ username, setUsername, loading, openProfile, connectAndSync, loadSample, error }: {
   username: string;
+  setUsername: (value: string) => void;
   loading: boolean;
   openProfile: () => void;
-  syncGames: () => void;
+  connectAndSync: () => void;
   loadSample: () => void;
+  error?: string;
 }) {
   return (
-    <section className="dashboard mobile-screen">
-      <div className="home-hero">
-        <span className="connection-pill">{username ? "Chess.com profile ready" : "Profile not connected"}</span>
-        <h2>{username ? `Ready to coach ${username}` : "Connect your chess profile"}</h2>
-        <p>Your dashboard becomes a live coaching feed once Pattern Coach can read your recent games.</p>
+    <section className="login-screen mobile-screen">
+      <div className="home-hero login-card">
+        <span className="connection-pill">First run</span>
+        <h2>Connect your Chess.com games</h2>
+        <p>Enter your public Chess.com username once. Pattern Coach will save it locally and refresh your games when you reopen the app.</p>
+        <label className="login-username">
+          <span>Chess.com username</span>
+          <input
+            value={username}
+            onChange={event => setUsername(event.target.value)}
+            placeholder="hikaru"
+            autoCapitalize="none"
+            autoComplete="username"
+          />
+        </label>
+        {error && <div className="inline-error">{error}</div>}
         <div className="home-actions">
-          {username ? (
-            <button className="primary-button" onClick={syncGames} disabled={loading}>
-              {loading ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />} Sync games
-            </button>
-          ) : (
-            <button className="primary-button" onClick={openProfile}><Link2 size={16} /> Connect profile</button>
-          )}
-          <button className="ghost-button" onClick={loadSample}>Try sample</button>
+          <button className="primary-button" onClick={connectAndSync} disabled={loading || !username.trim()}>
+            {loading ? <LoaderCircle className="spin" size={16} /> : <Link2 size={16} />} Connect and sync
+          </button>
+          <button className="ghost-button" onClick={openProfile}>More import options</button>
         </div>
       </div>
 
       <div className="onboarding-rail">
         <div>
-          <User size={18} />
-          <strong>Connect</strong>
-          <span>Add a Chess.com username from profile.</span>
+          <RefreshCw size={18} />
+          <strong>Auto-sync</strong>
+          <span>Your saved username refreshes public games on launch.</span>
         </div>
         <div>
           <Search size={18} />
-          <strong>Analyze</strong>
-          <span>Recent public games become reviewed moves.</span>
+          <strong>Review</strong>
+          <span>Every imported game becomes a move-by-move training map.</span>
         </div>
         <div>
           <Sword size={18} />
           <strong>Train</strong>
-          <span>Drill your own blunders, mistakes, and inaccuracies.</span>
+          <span>Drill the positions that came from your own games.</span>
         </div>
       </div>
 
-      <section className="trainer-panel next-level-card">
-        <div className="panel-heading"><Clock3 size={16} /><h2>Coming coaching loop</h2></div>
-        <p>After sync, this home screen should keep resurfacing the positions you failed, the patterns that repeat, and the drill queue due today.</p>
-      </section>
+      <button className="sample-link" onClick={loadSample}>Explore with sample data</button>
     </section>
   );
 }
 
-function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, setGameLimit, timeClass, setTimeClass, pgnText, setPgnText, loading, runChessComConnect, runChessComImport, runPgnAnalysis, loadSample, close }: {
+function AppMenu({ report, username, syncMeta, loading, close, openProfile, syncGames, clearData }: {
+  report: AnalysisReport | null;
+  username: string;
+  syncMeta: SyncMeta;
+  loading: boolean;
+  close: () => void;
+  openProfile: () => void;
+  syncGames: () => void;
+  clearData: () => void;
+}) {
+  return (
+    <div className="profile-overlay menu-overlay" role="dialog" aria-modal="true" aria-label="App menu">
+      <div className="profile-sheet app-menu-sheet">
+        <div className="sheet-header">
+          <div>
+            <span className="eyebrow">Menu</span>
+            <h2>Pattern Coach</h2>
+          </div>
+          <button className="icon-button sheet-close" onClick={close} aria-label="Close menu"><X size={18} /></button>
+        </div>
+        <div className="profile-status-card">
+          <div className={`profile-avatar-large ${username ? "connected" : ""}`}>{username ? username.slice(0, 2).toUpperCase() : <User size={22} />}</div>
+          <div>
+            <strong>{username || "No Chess.com username"}</strong>
+            <span>{syncMeta.lastSyncedAt ? `Last synced ${new Date(syncMeta.lastSyncedAt).toLocaleString()}` : syncMeta.message || "Connect to keep games updated."}</span>
+          </div>
+        </div>
+        <div className="menu-action-list">
+          <button onClick={openProfile}><User size={17} /> Profile and import</button>
+          <button onClick={syncGames} disabled={loading || !username.trim()}><RefreshCw size={17} /> {report ? "Sync latest games" : "Sync games"}</button>
+          <a href="/legal/privacy.html" target="_blank" rel="noreferrer"><Shield size={17} /> Privacy policy</a>
+          <a href="/legal/terms.html" target="_blank" rel="noreferrer"><FileUp size={17} /> Terms</a>
+          <a href="/legal/support.html" target="_blank" rel="noreferrer"><AlertTriangle size={17} /> Support</a>
+          <button className="danger-menu-item" onClick={clearData}><X size={17} /> Clear local data</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, setGameLimit, timeClass, setTimeClass, pgnText, setPgnText, loading, runChessComConnect, runChessComImport, runPgnAnalysis, loadSample, forgetProfile, close }: {
   username: string;
   setUsername: (value: string) => void;
   months: number;
@@ -535,6 +735,7 @@ function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, set
   runChessComImport: () => void;
   runPgnAnalysis: (text?: string, usernameOverride?: string) => void;
   loadSample: () => void;
+  forgetProfile: () => void;
   close: () => void;
 }) {
   return (
@@ -587,10 +788,7 @@ function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, set
           <button className="ghost-button profile-sync" onClick={runChessComImport} disabled={loading || !username.trim()}>
             {loading ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />} Sync {timeClass === "all" ? "Chess.com" : timeClass} games
           </button>
-          <button className="ghost-button profile-sync" onClick={() => {
-            localStorage.removeItem("pattern-coach-profile");
-            setUsername("");
-          }}>
+          <button className="ghost-button profile-sync" onClick={forgetProfile}>
             Forget profile
           </button>
         </section>
@@ -623,95 +821,45 @@ function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, set
   );
 }
 
-function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHighlights, openQuality, trainNow, openAnalysis }: {
+function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHighlights, openQuality, trainNow, openAnalysis, syncMeta }: {
   report: AnalysisReport; selectedIssue: MoveIssue | null; setSelectedIssue: (i: MoveIssue) => void;
   topPhase: Phase; boardHighlights: Record<string, string>;
   openQuality: (quality: MoveReviewQuality) => void;
   trainNow: () => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string) => void;
+  syncMeta: SyncMeta;
 }) {
   const { skillProfile, moveQuality } = report;
-  const issueQueue = report.issues.slice().sort((a, b) => b.severity - a.severity).slice(0, 12);
-  const qualityCounts = {
-    blunder: report.moveReviews.filter(move => move.quality === "blunder").length,
-    miss: report.moveReviews.filter(move => move.quality === "miss").length,
-    mistake: report.moveReviews.filter(move => qualityBucket(move.quality) === "mistake").length,
-    best: report.moveReviews.filter(move => move.quality === "best").length,
-    good: report.moveReviews.filter(move => move.quality === "good").length,
-  };
+  const dueIssues = report.issues
+    .slice()
+    .sort((a, b) => b.severity - a.severity)
+    .slice(0, 4);
 
   return (
-    <section className="dashboard mobile-screen">
-      <div className="dashboard-hero">
-        <div className="hero-copy">
-          <span className="eyebrow">Training command</span>
-          <h2>{report.summaries[0]?.title || "Performance Dashboard"}</h2>
-          <p>{report.summaries[0]?.advice || "Comprehensive summary of your recent games and identified patterns."}</p>
-          <button className="primary-button" onClick={trainNow}>Train Now <ChevronRight size={18} /></button>
-        </div>
-        <ChessBoard
-          fen={selectedIssue?.fenBefore}
-          flipped={selectedIssue?.color === "black"}
-          highlightSquares={boardHighlights}
-          onAnalyze={() => openAnalysis(selectedIssue?.fenBefore, selectedIssue?.color === "black", selectedIssue?.title)}
-          size={292}
-        />
+    <section className="dashboard restored-dashboard">
+      <div className="dashboard-actions">
+        <button className="primary-button" onClick={trainNow}><Dumbbell size={16} /> Drill mode</button>
+        <button className="ghost-button" onClick={() => openAnalysis(selectedIssue?.fenBefore, selectedIssue?.color === "black", selectedIssue?.title)} disabled={!selectedIssue}>
+          <Search size={16} /> Analyze position
+        </button>
       </div>
 
       <div className="metric-grid">
-        <Metric icon={<Crown size={16} />} label="Games Analyzed" value={report.games.toString()} />
-        <Metric icon={<Swords size={16} />} label="Moves Checked" value={report.moves > 999 ? `${(report.moves / 1000).toFixed(1)}k` : report.moves.toString()} />
-        <Metric icon={<Target size={16} />} label="Patterns Found" value={report.issues.length.toString()} />
-        <Metric icon={<TrendingUp size={16} />} label="Est. Performance" value={skillProfile.estimatedRating.toString()} />
+        <Metric icon={<Crown size={16} />} label="Games" value={report.games.toString()} />
+        <Metric icon={<Swords size={16} />} label="Moves" value={report.moves.toString()} />
+        <Metric icon={<Target size={16} />} label="Patterns" value={report.issues.length.toString()} />
+        <Metric icon={<TrendingUp size={16} />} label="Est. rating" value={skillProfile.estimatedRating.toString()} />
       </div>
 
-      <section className="focus-card compact-focus">
-        <span className="critical-badge">Critical Focus Area</span>
-        <h3>{report.summaries[0]?.title || "Kingside Safety"}</h3>
-        <p>{report.summaries[0]?.advice || "This pattern has cost you significant evaluation in recent games."}</p>
+      <section className="trainer-panel sync-panel">
+        <div className="panel-heading"><RefreshCw size={16} /><h2>Game sync</h2></div>
+        <p>{syncMeta.message || "Your latest public Chess.com games will refresh automatically when the app opens."}</p>
+        {syncMeta.lastSyncedAt && <small>Last updated {new Date(syncMeta.lastSyncedAt).toLocaleString()}</small>}
       </section>
 
-      <section>
-        <div className="skill-header"><Zap size={16} /><h2>Move Review</h2></div>
-        <div className="quality-card-grid">
-          <QualityReviewCard icon={<AlertTriangle size={18} />} label="Blunders" value={qualityCounts.blunder} tone="bad" onClick={() => openQuality("blunder")} />
-          <QualityReviewCard icon={<Target size={18} />} label="Misses" value={qualityCounts.miss} tone="miss" onClick={() => openQuality("miss")} />
-          <QualityReviewCard icon={<Shield size={18} />} label="Mistakes" value={qualityCounts.mistake} tone="warn" onClick={() => openQuality("mistake")} />
-          <QualityReviewCard icon={<Crown size={18} />} label="Best" value={qualityCounts.best} tone="good" onClick={() => openQuality("best")} />
-          <QualityReviewCard icon={<CheckCircle2 size={18} />} label="Good" value={qualityCounts.good} tone="neutral" onClick={() => openQuality("good")} />
-        </div>
-      </section>
-
-      <section className="skill-section">
-        <div className="skill-profile-card">
-          <div className="skill-header"><BarChart3 size={16} /><h2>Skill Profile</h2></div>
-          <div className="dimension-grid">
-            {(Object.entries(skillProfile.scores) as [SkillDimension, number][]).slice(0, 5).map(([dim, score]) => (
-              <div key={dim} className="dimension-row">
-                <span className="dimension-label">{dimensionLabels[dim]}</span>
-                <div className="dimension-bar">
-                  <div className={`dimension-fill ${score < 50 ? "danger" : score < 60 ? "warn" : ""}`} style={{ width: `${score}%` }} />
-                </div>
-                <span className="dimension-value">{score}%</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <section>
-        <div className="skill-header"><Target size={16} /><h2>Recent Patterns Identified</h2></div>
-        <div className="pattern-list compact-patterns">
-          {report.summaries.map(s => (
-            <PatternCard key={s.id} summary={s} setSelectedIssue={setSelectedIssue} />
-          ))}
-        </div>
-      </section>
-
-      <section className="desktop-extra">
-        <div className="coach-grid">
-          <div className="trainer-panel priority-panel">
-            <div className="panel-heading"><Brain size={16} /><h2>Focus area</h2></div>
+      <section className="coach-grid">
+        <div className="trainer-panel priority-panel">
+          <div className="panel-heading"><Brain size={16} /><h2>Focus area</h2></div>
           {report.summaries[0] ? (
             <>
               <h3>{report.summaries[0].title}</h3>
@@ -721,7 +869,102 @@ function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHig
           ) : (
             <p>No recurring patterns found in this sample.</p>
           )}
+        </div>
+
+        <div className="trainer-panel board-panel">
+          <div className="panel-heading"><Target size={16} /><h2>Position lens</h2></div>
+          <div className="dashboard-board-frame">
+            <ChessBoard
+              fen={selectedIssue?.fenAfter || selectedIssue?.fenBefore}
+              flipped={selectedIssue?.color === "black"}
+              highlightSquares={boardHighlights}
+              onAnalyze={() => openAnalysis(selectedIssue?.fenBefore, selectedIssue?.color === "black", selectedIssue?.title)}
+              size={420}
+            />
           </div>
+          {selectedIssue && (
+            <div className="position-caption">
+              <strong>{selectedIssue.moveNumber}. {selectedIssue.san}</strong>
+              <span>{selectedIssue.explanation}</span>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="skill-section">
+        <div className="skill-header"><BarChart3 size={16} /><h2>Skill profile</h2></div>
+        <div className="skill-profile-card">
+          <div className="skill-profile-header">
+            <div className="profile-left">
+              <h3>Your chess DNA</h3>
+              <p>{skillProfile.descriptions[skillProfile.strongest]}</p>
+            </div>
+            <div className="rating-display">
+              <div className="rating-number">{skillProfile.estimatedRating}</div>
+              <div className="rating-label">Estimated rating</div>
+            </div>
+          </div>
+
+          <div className="dimension-grid">
+            {(Object.entries(skillProfile.scores) as [SkillDimension, number][]).map(([dim, score]) => (
+              <div key={dim} className="dimension-row">
+                <span className="dimension-label">{dimensionLabels[dim]}</span>
+                <div className="dimension-bar">
+                  <div className="dimension-fill" style={{ width: `${score}%` }} />
+                </div>
+                <span className="dimension-value">{score}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div className="skill-header"><Zap size={16} /><h2>Move quality distribution</h2></div>
+        <div className="quality-grid">
+          <QualityChip label="Blunders" value={moveQuality.blunders} />
+          <QualityChip label="Mistakes" value={moveQuality.mistakes} />
+          <QualityChip label="Inaccuracies" value={moveQuality.inaccuracies} />
+          <QualityChip label="Good" value={moveQuality.good} />
+          <QualityChip label="Excellent" value={moveQuality.excellent} />
+        </div>
+      </section>
+
+      <section>
+        <div className="skill-header"><Target size={16} /><h2>Patterns</h2></div>
+        <div className="pattern-list">
+          {report.summaries.map(s => (
+            <PatternCard key={s.id} summary={s} setSelectedIssue={setSelectedIssue} />
+          ))}
+        </div>
+      </section>
+
+      <section className="trainer-panel drill-queue-card">
+        <div className="panel-heading"><Clock3 size={16} /><h2>Today&apos;s drill queue</h2></div>
+        <div className="due-list">
+          {dueIssues.length ? dueIssues.map(issue => (
+            <button key={`${issue.fenBefore}-${issue.uci}-${issue.id}`} onClick={() => setSelectedIssue(issue)}>
+              <span>{issue.moveNumber}. {issue.san}</span>
+              <strong>{issue.title}</strong>
+              <small>{issue.opening || issue.phase}</small>
+            </button>
+          )) : (
+            <p>No trainable mistakes yet. Sync more games or paste a PGN to build a queue.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="trainer-panel">
+        <div className="panel-heading"><Activity size={16} /><h2>Games with training signal</h2></div>
+        <div className="game-table">
+          {report.gameSummaries.slice().sort((a, b) => b.issues - a.issues).slice(0, 8).map((g, i) => (
+            <a href={g.url} target="_blank" rel="noreferrer" className="game-row" key={`${g.url}-${i}`}>
+              <span>{g.opponent || "Unknown"}</span>
+              <span>{g.opening || "-"}</span>
+              <span>{g.color}</span>
+              <strong>{g.issues}</strong>
+            </a>
+          ))}
         </div>
       </section>
     </section>
@@ -762,7 +1005,7 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
     const base = report.moveReviews
       .filter(review => timeFilter === "all" || review.timeClass === timeFilter)
       .filter(review => selectedPatternId === "all" || review.issueIds.includes(selectedPatternId as any))
-      .filter(review => review.issueIds.length && isTrainableQuality(review.quality));
+      .filter(review => review.issueIds.length);
     return {
       all: base.length,
       blunder: base.filter(review => qualityBucket(review.quality) === "blunder").length,
@@ -774,15 +1017,43 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
       .filter(review => timeFilter === "all" || review.timeClass === timeFilter)
       .filter(review => selectedPatternId === "all" || review.issueIds.includes(selectedPatternId as any))
       .filter(review => qualityFilter === "all" || qualityBucket(review.quality) === qualityFilter)
-      .filter(review => review.issueIds.length && isTrainableQuality(review.quality))
+      .filter(review => review.issueIds.length)
       .sort((a, b) => sortMode === "latest"
         ? (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId) || (b.engineEvalLoss ?? b.severity) - (a.engineEvalLoss ?? a.severity)
         : (b.engineEvalLoss ?? b.severity) - (a.engineEvalLoss ?? a.severity) || (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId))
       .slice(0, 80),
     [report.moveReviews, timeFilter, selectedPatternId, qualityFilter, sortMode]
   );
-  const issueForReview = (review: MoveReview) =>
-    report.issues.find(issue => issue.fenBefore === review.fenBefore && issue.san === review.san);
+  const issueForReview = (review: MoveReview): MoveIssue | null => {
+    const exact = report.issues.find(issue => issue.fenBefore === review.fenBefore && (issue.san === review.san || issue.uci === review.uci));
+    if (exact) return exact;
+    const patternId = review.issueIds[0];
+    if (!patternId) return null;
+    const summary = report.summaries.find(item => item.id === patternId);
+    const similar = report.issues.find(issue => issue.id === patternId);
+    return {
+      id: patternId,
+      phase: review.phase,
+      quality: review.quality,
+      severity: review.severity,
+      title: summary?.title || review.title,
+      explanation: review.explanation,
+      advice: summary?.advice || similar?.advice || "Compare the played move with the engine arrow and replay the position until the safer move is automatic.",
+      moveNumber: review.moveNumber,
+      san: review.san,
+      uci: review.uci,
+      materialGain: review.materialGain,
+      fenBefore: review.fenBefore,
+      fenAfter: review.fenAfter,
+      gameUrl: review.gameUrl,
+      opponent: review.opponent,
+      color: review.color,
+      opening: review.opening,
+      engineBestMove: review.engineBestMove,
+      engineEvalLoss: review.engineEvalLoss,
+      engineReviewed: review.engineReviewed,
+    };
+  };
   const selectedReview = reviews.find(review => review.id === selectedReviewId);
   const selectedReviewIssue = selectedReview ? issueForReview(selectedReview) : null;
   const selectedIndex = selectedReview ? reviews.findIndex(review => review.id === selectedReview.id) : -1;
@@ -799,34 +1070,20 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
     }
   }, [filterCounts, qualityFilter]);
 
-  if (selectedReview && selectedReviewIssue) {
-    const selectedGame = report.gameSummaries.find(game => game.id === selectedReview.gameId);
-    return (
-      <MistakeDetail
-        review={selectedReview}
-        issue={selectedReviewIssue}
-        game={selectedGame}
-        back={() => setSelectedReviewId("")}
-        next={reviews[selectedIndex + 1] ? () => {
-          const nextReview = reviews[selectedIndex + 1];
-          const nextIssue = issueForReview(nextReview);
-          if (nextIssue) setSelectedIssue(nextIssue);
-          setSelectedReviewId(nextReview.id);
-        } : undefined}
-        prev={reviews[selectedIndex - 1] ? () => {
-          const previousReview = reviews[selectedIndex - 1];
-          const previousIssue = issueForReview(previousReview);
-          if (previousIssue) setSelectedIssue(previousIssue);
-          setSelectedReviewId(previousReview.id);
-        } : undefined}
-        train={() => startDrill(qualityBucket(selectedReview.quality), selectedReviewIssue.id, selectedReviewIssue)}
-        openAnalysis={openAnalysis}
-      />
-    );
-  }
+  const selectedGame = selectedReview ? report.gameSummaries.find(game => game.id === selectedReview.gameId) : undefined;
 
   return (
     <section className="mistake-screen mobile-screen">
+      <div className="mistake-lab-header">
+        <div>
+          <span className="eyebrow">Mistake Lab</span>
+          <h2>{reviews.length} {reviews.length === 1 ? "mistake" : "mistakes"}</h2>
+        </div>
+        <button className="primary-button" onClick={() => startDrill(qualityFilter, selectedPatternId)} disabled={!reviews.length}>
+          <Dumbbell size={16} /> Drill shown
+        </button>
+      </div>
+
       <div className="lab-filter-tabs">
         {(["all", "blunder", "miss", "mistake"] as Array<TrainableReviewBucket | "all">).map(quality => (
           <button
@@ -877,7 +1134,7 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
           return (
           <button
             key={review.id}
-            className={`mistake-big-card ${selectedIssue === issue ? "active" : ""}`}
+            className={`mistake-big-card ${selectedReviewId === review.id ? "active" : ""}`}
             onClick={() => {
               if (issue) {
                 setSelectedIssue(issue);
@@ -886,24 +1143,153 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
             }}
           >
             <div className="mistake-card-body">
-              <div className="move-row">
-                <div className="move-copy">
-                  <strong>{review.moveNumber}. {review.san}</strong>
-                  <span className={`tag ${bucket}`}>{qualityLabel(review.quality)}</span>
+              <div className="mistake-card-topline">
+                <div>
+                  <span>{phaseLabels[review.phase]}</span>
+                  <strong>{review.san}</strong>
                 </div>
                 <span className="eval-swing">{formatReviewSwing(review)}</span>
               </div>
-              <p><Zap size={14} /> {review.phase} vs {review.opponent || "opponent"} <i /> {formatReviewDate(review)}</p>
-              <small>{reviewSwingCopy(review)}</small>
+              <div className="mistake-card-tags">
+                <span className={`tag ${bucket}`}>{qualityLabel(review.quality)}</span>
+                <span>{issue?.title || review.title}</span>
+              </div>
+              <p><Zap size={14} /> {visualConsequenceCopy(review, issue)} <i /> {review.opponent || "Opponent"}</p>
             </div>
           </button>
         )})}
+        {!reviews.length && (
+          <div className="empty-lab-state">
+            <strong>No mistakes match these filters</strong>
+            <span>Switch to All, choose another category, or sync more games.</span>
+          </div>
+        )}
       </div>
-
-      <button className="start-drill-button" onClick={() => startDrill(qualityFilter, selectedPatternId)}>
-        <Dumbbell size={25} /> Drill This Set
-      </button>
+      {selectedReview && selectedReviewIssue && (
+        <MistakeBottomSheet
+          review={selectedReview}
+          issue={selectedReviewIssue}
+          game={selectedGame}
+          close={() => setSelectedReviewId("")}
+          next={reviews[selectedIndex + 1] ? () => {
+            const nextReview = reviews[selectedIndex + 1];
+            const nextIssue = issueForReview(nextReview);
+            if (nextIssue) setSelectedIssue(nextIssue);
+            setSelectedReviewId(nextReview.id);
+          } : undefined}
+          prev={reviews[selectedIndex - 1] ? () => {
+            const previousReview = reviews[selectedIndex - 1];
+            const previousIssue = issueForReview(previousReview);
+            if (previousIssue) setSelectedIssue(previousIssue);
+            setSelectedReviewId(previousReview.id);
+          } : undefined}
+          train={() => startDrill(qualityBucket(selectedReview.quality), selectedReviewIssue.id, selectedReviewIssue)}
+          openAnalysis={openAnalysis}
+        />
+      )}
     </section>
+  );
+}
+
+function MistakeBottomSheet({ review, issue, game, close, next, prev, train, openAnalysis }: {
+  review: MoveReview;
+  issue: MoveIssue;
+  game?: GameSummary;
+  close: () => void;
+  next?: () => void;
+  prev?: () => void;
+  train: () => void;
+  openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => void;
+}) {
+  const betterMove = review.engineBestMove || review.engineLines?.[0]?.bestMove || "";
+  const bucket = qualityBucket(review.quality);
+  const betterLabel = formatEngineUci(betterMove) || "Best line";
+  const [comparison, setComparison] = useState<"played" | "better">("played");
+  const playedArrow = { from: review.uci.slice(0, 2), to: review.uci.slice(2, 4), color: comparison === "played" ? "rgba(255,89,89,0.84)" : "rgba(255,89,89,0.30)" };
+  const betterArrow = betterMove ? { from: betterMove.slice(0, 2), to: betterMove.slice(2, 4), color: comparison === "better" ? "rgba(183,226,107,0.88)" : "rgba(183,226,107,0.32)" } : null;
+  return (
+    <div className="mistake-sheet-backdrop" role="dialog" aria-modal="true" aria-label="Mistake details">
+      <div className="mistake-sheet">
+        <button className="sheet-grabber" onClick={close} aria-label="Close mistake details" />
+        <div className="sheet-title-row">
+          <div>
+            <span className="eyebrow">{phaseLabels[review.phase]}</span>
+            <h2>{review.san}</h2>
+          </div>
+          <span className="eval-swing large">{formatReviewSwing(review)}</span>
+        </div>
+
+        <MistakeEvalSwing review={review} />
+
+        <div className="mistake-visual-card">
+          <ChessBoard
+            fen={review.fenBefore}
+            flipped={review.color === "black"}
+            arrows={[playedArrow, ...(betterArrow ? [betterArrow] : [])]}
+            size={760}
+          />
+          <div className="sheet-move-compare">
+            <button
+              type="button"
+              className={`played ${comparison === "played" ? "active" : ""}`}
+              onClick={() => setComparison("played")}
+              aria-pressed={comparison === "played"}
+              aria-label={`Show your move ${review.san}`}
+            >
+              <span>Your move</span>
+              <strong>{review.san}</strong>
+            </button>
+            <button
+              type="button"
+              className={`better ${comparison === "better" ? "active" : ""}`}
+              onClick={() => setComparison("better")}
+              aria-pressed={comparison === "better"}
+              aria-label={`Show better move ${betterLabel}`}
+              disabled={!betterMove}
+            >
+              <span>Better</span>
+              <strong>{betterLabel}</strong>
+            </button>
+          </div>
+        </div>
+
+        <div className="coach-why-card">
+          <span className={`tag ${bucket}`}>{qualityLabel(review.quality)}</span>
+          <strong>{issue.title}</strong>
+          <p>{coachMistakeCopy(review, issue, betterLabel)}</p>
+        </div>
+
+        <div className="sheet-actions">
+          {prev && <button className="ghost-button" onClick={prev}><ChevronLeft size={16} /> Prev</button>}
+          <button className="ghost-button" onClick={() => openAnalysis(review.fenBefore, review.color === "black", `${review.san}`, { gamePgn: game?.pgn })}><Search size={16} /> Analyze</button>
+          <button className="primary-button" onClick={train}><Sword size={16} /> Train</button>
+          {next && <button className="ghost-button" onClick={next}>Next <ChevronRight size={16} /></button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MistakeEvalSwing({ review }: { review: MoveReview }) {
+  const before = typeof review.engineEvalBefore === "number" ? review.engineEvalBefore : undefined;
+  const after = typeof review.engineEvalAfter === "number" ? review.engineEvalAfter : undefined;
+  const beforePct = review.color === "black" ? 100 - evalToWhitePercent(before) : evalToWhitePercent(before);
+  const afterPct = review.color === "black" ? 100 - evalToWhitePercent(after) : evalToWhitePercent(after);
+  const beforeLabel = formatEngineEval(before) || "Before";
+  const afterLabel = formatEngineEval(after) || "After";
+  return (
+    <div className="mistake-eval-strip" aria-label={`Evaluation swing ${formatReviewSwing(review)}`}>
+      <div className="mistake-eval-labels">
+        <span>Before <strong>{beforeLabel}</strong></span>
+        <b>{formatReviewSwing(review)}</b>
+        <span>After <strong>{afterLabel}</strong></span>
+      </div>
+      <div className="mistake-eval-track">
+        <i className="before" style={{ left: `${beforePct}%` }} />
+        <i className="after" style={{ left: `${afterPct}%` }} />
+        <em style={{ left: `${Math.min(beforePct, afterPct)}%`, width: `${Math.max(4, Math.abs(beforePct - afterPct))}%` }} />
+      </div>
+    </div>
   );
 }
 
@@ -1318,6 +1704,7 @@ function isTrainableQuality(quality: MoveReviewQuality) {
 }
 
 function reviewLossCp(review: MoveReview) {
+  if (typeof review.engineEvalLoss === "number") return Math.max(0, review.engineEvalLoss);
   if (typeof review.engineEvalBefore === "number" && typeof review.engineEvalAfter === "number") {
     const playerSign = review.color === "white" ? 1 : -1;
     return Math.max(0, (review.engineEvalBefore - review.engineEvalAfter) * playerSign);
@@ -1331,6 +1718,7 @@ function formatReviewSwing(review: MoveReview) {
 }
 
 function formatEngineEvalLoss(lossCp: number) {
+  if (lossCp <= 0) return "0.0";
   const pawns = Math.max(0.1, Math.abs(lossCp) / 100);
   return `-${pawns.toFixed(pawns >= 10 ? 0 : 1)}`;
 }
@@ -1338,6 +1726,25 @@ function formatEngineEvalLoss(lossCp: number) {
 function reviewSwingCopy(review: MoveReview) {
   const better = review.engineBestMove ? formatEngineUci(review.engineBestMove) : "the engine move";
   return `${better} was preferred. Eval swing ${formatReviewSwing(review)}.`;
+}
+
+function visualConsequenceCopy(review: MoveReview, issue?: MoveIssue | null) {
+  if (issue?.explanation) return issue.explanation.replace(/\.$/, "");
+  const loss = reviewLossCp(review);
+  if (loss >= 250) return "Major consequence";
+  if (loss >= 120) return "Position slipped";
+  if (loss >= 50) return "Small edge lost";
+  return "Pattern to review";
+}
+
+function coachMistakeCopy(review: MoveReview, issue: MoveIssue, betterLabel: string) {
+  const consequence = visualConsequenceCopy(review, issue);
+  if (issue.id === "twoMoveBlindspot") return `${consequence}. The visual clue: after your move, the opponent gets the next forcing shot. Compare the red arrow with ${betterLabel}.`;
+  if (issue.id === "queenEarly") return `${consequence}. The queen moved before the position was ready, so the better move keeps development and king safety first.`;
+  if (issue.id === "loosePiece") return `${consequence}. A piece became tactically loose. The better move removes that target or creates a stronger threat.`;
+  if (issue.id === "kingShelter") return `${consequence}. The king cover opens up. Keep the shelter intact unless the tactic is concrete.`;
+  if (issue.id === "missedForcingMove") return `${consequence}. The board had a forcing move available. Look for checks, captures, and threats before quiet moves.`;
+  return `${consequence}. The better move, ${betterLabel}, changes the shape of the position before the punishment arrives.`;
 }
 
 function refineReviewWithEngine(
@@ -1375,7 +1782,7 @@ function refineReviewWithEngine(
     engineDepth: engine.depth,
     engineConfidence: engine.confidence,
     engineLines: engine.multipv,
-    engineReviewed: true,
+      engineReviewed: true,
   };
 }
 
@@ -1402,6 +1809,9 @@ function addEngineIssues(existingIssues: MoveIssue[], updates: Map<string, MoveR
       opponent: review.opponent,
       color: review.color,
       opening: review.opening,
+      engineBestMove: review.engineBestMove,
+      engineEvalLoss: review.engineEvalLoss,
+      engineReviewed: review.engineReviewed,
     });
   }
   return issues;
@@ -1604,6 +2014,10 @@ function formatReviewDate(review: MoveReview) {
 
 function Metric({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
   return <div className="metric">{icon}<span>{label}</span><strong>{value}</strong></div>;
+}
+
+function QualityChip({ label, value }: { label: string; value: number }) {
+  return <div className="quality-chip"><strong>{value}</strong><span>{label}</span></div>;
 }
 
 function PatternCard({ summary, setSelectedIssue }: { summary: PatternSummary; setSelectedIssue: (i: MoveIssue) => void }) {

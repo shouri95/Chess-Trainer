@@ -1,13 +1,17 @@
 {
   "name": "i-want-to-build-an-app",
   "version": "1.0.0",
-  "description": "",
+  "description": "Pattern Coach turns public Chess.com games into personalized chess review and drills.",
   "type": "module",
   "scripts": {
     "postinstall": "node scripts/sync-stockfish-assets.mjs",
     "sync:engine": "node scripts/sync-stockfish-assets.mjs",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
+    "ios:assets": "node scripts/generate-ios-assets.mjs",
+    "ios:add": "cap add ios",
+    "ios:sync": "npm run build && npm run ios:assets && cap sync ios",
+    "ios:open": "cap open ios",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run"
   },
@@ -15,6 +19,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@capacitor/core": "^6.2.1",
+    "@capacitor/ios": "^6.2.1",
     "chess.js": "^1.4.0",
     "lucide-react": "^1.14.0",
     "react": "^19.2.6",
@@ -22,6 +28,7 @@
     "stockfish": "^18.0.7"
   },
   "devDependencies": {
+    "@capacitor/cli": "^6.2.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.7.0",

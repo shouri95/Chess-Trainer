@@ -51,16 +51,19 @@ export type MoveEngineResult = {
   confidence: EngineConfidence;
 };
 
-export const DEFAULT_ENGINE_DEPTH = 18;
+export const DEFAULT_ENGINE_DEPTH = 12;
 export const DEFAULT_ENGINE_MULTIPV = 4;
+const ENGINE_CACHE_LIMIT = 300;
 
 export function normalizeSearchEval(
   fen: string,
   score: Pick<EngineLine, "evalCp" | "mate">,
 ): NormalizedEval {
+  const sideToMove = fen.split(/\s+/)[1] === "b" ? "b" : "w";
+  const sign = sideToMove === "w" ? 1 : -1;
   return {
-    cp: typeof score.evalCp === "number" ? score.evalCp : undefined,
-    mate: typeof score.mate === "number" ? score.mate : undefined,
+    cp: typeof score.evalCp === "number" ? score.evalCp * sign : undefined,
+    mate: typeof score.mate === "number" ? score.mate * sign : undefined,
   };
 }
 
@@ -125,6 +128,8 @@ export class StockfishEngineService {
   private failed = false;
   private initPromise: Promise<void> | null = null;
   private queue: Promise<unknown> = Promise.resolve();
+  private cache = new Map<string, EngineEvaluation>();
+  private inFlight = new Map<string, Promise<EngineEvaluation>>();
 
   init() {
     if (this.initPromise) return this.initPromise;
@@ -182,7 +187,25 @@ export class StockfishEngineService {
   }
 
   async analyzePosition(request: AnalyzePositionRequest): Promise<EngineEvaluation> {
-    return this.enqueue(() => this.analyzePositionNow(request));
+    const cacheKey = this.cacheKey(request);
+    const cached = this.cache.get(cacheKey);
+    if (cached) return cached;
+    const active = this.inFlight.get(cacheKey);
+    if (active) return active;
+
+    const run = this.enqueue(() => this.analyzePositionNow(request))
+      .then(result => {
+        if (result.confidence !== "failed" && result.depth > 0) {
+          this.cache.set(cacheKey, result);
+          this.trimCache();
+        }
+        return result;
+      })
+      .finally(() => {
+        this.inFlight.delete(cacheKey);
+      });
+    this.inFlight.set(cacheKey, run);
+    return run;
   }
 
   async evaluate(fen: string, depth = DEFAULT_ENGINE_DEPTH): Promise<string> {
@@ -195,7 +218,7 @@ export class StockfishEngineService {
       fen,
       depth,
       multipv,
-      timeoutMs: Math.max(8000, depth * 900),
+      timeoutMs: Math.max(3500, depth * 450),
     });
   }
 
@@ -216,7 +239,7 @@ export class StockfishEngineService {
       fen: fenBefore,
       depth,
       multipv,
-      timeoutMs: Math.max(8000, depth * 1000),
+      timeoutMs: Math.max(3500, depth * 500),
       signal,
     });
     const board = new Chess(fenBefore);
@@ -230,7 +253,7 @@ export class StockfishEngineService {
       fen: board.fen(),
       depth,
       multipv,
-      timeoutMs: Math.max(8000, depth * 1000),
+      timeoutMs: Math.max(3500, depth * 500),
       signal,
     });
     const playerColor = fenBefore.split(/\s+/)[1] === "b" ? "b" : "w";
@@ -283,6 +306,7 @@ export class StockfishEngineService {
     this.failed = false;
     this.initPromise = null;
     this.queue = Promise.resolve();
+    this.inFlight.clear();
   }
 
   private send(cmd: string) {
@@ -293,6 +317,18 @@ export class StockfishEngineService {
     const run = this.queue.then(task, task);
     this.queue = run.catch(() => undefined);
     return run;
+  }
+
+  private cacheKey(request: Pick<AnalyzePositionRequest, "fen" | "depth" | "multipv">) {
+    return `${request.depth}:${request.multipv}:${request.fen}`;
+  }
+
+  private trimCache() {
+    while (this.cache.size > ENGINE_CACHE_LIMIT) {
+      const oldest = this.cache.keys().next().value;
+      if (!oldest) return;
+      this.cache.delete(oldest);
+    }
   }
 
   private async analyzePositionNow(request: AnalyzePositionRequest): Promise<EngineEvaluation> {

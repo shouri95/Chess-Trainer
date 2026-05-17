@@ -83,12 +83,57 @@ describe("drill evaluator", () => {
 
     expect(judgement.status).toBe("correct");
   });
+
+  it("rejects replaying the original flagged move even when shallow engine output likes it", () => {
+    const fen = "r2q1rk1/ppp2p2/2np1n1p/2b1p1p1/2B1P1b1/2NP1NB1/PPP2PPP/R2QK2R w KQ - 0 10";
+    const judgement = judgeDrillMove({
+      fen,
+      uci: "f3g5",
+      rejectedMove: "f3g5",
+      problemExplanation: "Nxg5 allowed hxg5 and lost a piece.",
+      engine: {
+        fen,
+        bestMove: "f3g5",
+        evalCp: 70,
+        pv: "f3g5 c6d4 g5f3",
+        depth: 12,
+        confidence: "high",
+        lines: [
+          { multipv: 1, bestMove: "f3g5", evalCp: 70, pv: "f3g5 c6d4", depth: 12 },
+          { multipv: 2, bestMove: "h2h3", evalCp: 40, pv: "h2h3 g4h5", depth: 12 },
+        ],
+      },
+    });
+
+    expect(judgement.status).toBe("wrong");
+    expect(judgement.bestMove).toBe("h2h3");
+    expect(judgement.message).toContain("lost a piece");
+  });
+
+  it("keeps engine failure states actionable instead of marking moves solved", () => {
+    const judgement = judgeDrillMove({
+      fen: "8/8/8/8/8/8/4K3/7k w - - 0 1",
+      uci: "e2e3",
+      engine: {
+        fen: "8/8/8/8/8/8/4K3/7k w - - 0 1",
+        bestMove: "",
+        evalCp: undefined,
+        pv: "",
+        depth: 0,
+        confidence: "failed",
+      },
+    });
+
+    expect(judgement.status).toBe("wrong");
+    expect(judgement.message).toContain("reliable engine recommendation");
+  });
 });
 
 describe("engine-backed classification", () => {
   it("keeps Stockfish 18 scores in White perspective", () => {
     expect(normalizeSearchEval("8/8/8/8/8/8/8/K6k w - - 0 1", { evalCp: 42 }).cp).toBe(42);
-    expect(normalizeSearchEval("8/8/8/8/8/8/8/K6k b - - 0 1", { evalCp: 42 }).cp).toBe(42);
+    expect(normalizeSearchEval("8/8/8/8/8/8/8/K6k b - - 0 1", { evalCp: 42 }).cp).toBe(-42);
+    expect(normalizeSearchEval("8/8/8/8/8/8/8/K6k b - - 0 1", { mate: 3 }).mate).toBe(-3);
   });
 
   it("computes centipawn loss from the player perspective", () => {

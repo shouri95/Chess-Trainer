@@ -146,7 +146,14 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
       const engine = await evaluatePosition(currentFen, DEFAULT_ENGINE_DEPTH);
       if (!mountedRef.current || actionToken !== actionTokenRef.current) return;
       setEngineEval(engine);
-      const judgement = judgeDrillMove({ fen: currentFen, uci: userMove, engine });
+      const judgement = judgeDrillMove({
+        fen: currentFen,
+        uci: userMove,
+        engine,
+        rejectedMove: issue.uci,
+        preferredMove: issue.engineBestMove,
+        problemExplanation: issue.explanation,
+      });
       setBestMove(judgement.bestMove);
       setEngineLine(judgement.engineLine);
       setJudgementText(judgement.message);
@@ -335,6 +342,9 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
         {feedback === "thinking" && <Cpu size={18} className="engine-icon" />}
         {(feedback === "correct" || feedback === "theory") && <Check size={18} className="correct-icon" />}
         {feedback === "wrong" && <X size={18} className="wrong-icon" />}
+        {judgementText && feedback === "wrong" && (
+          <p className="drill-consequence"><span>Consequence</span>{judgementText}</p>
+        )}
         {engineLine && (feedback === "correct" || feedback === "wrong") && <small>{engineLine.split(" ").slice(0, 5).map(formatUci).join(" ")}</small>}
         <div className="status-segments" aria-label={`${completed.size} of ${trainingIssues.length} completed`}>
           {trainingIssues.slice(0, 12).map((_, segmentIndex) => (
