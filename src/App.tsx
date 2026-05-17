@@ -232,7 +232,9 @@ export default function App() {
   }, [selectedIssue]);
 
   async function runChessComImport(options: { keepCurrentReport?: boolean; silent?: boolean; usernameOverride?: string } = {}) {
-    setError(""); setLoading(true); setProgress(options.silent ? null : null);
+    setError("");
+    if (!options.silent) setLoading(true);
+    setProgress(null);
     setSyncMeta({ status: "syncing", source: "chesscom", message: "Syncing Chess.com games" });
     analysisAbortRef.current?.abort();
     const controller = new AbortController();
@@ -240,13 +242,36 @@ export default function App() {
     try {
       const progressHandler = options.silent ? undefined : setProgress;
       const syncUsername = options.usernameOverride || username;
-      const games = await fetchChessComGames(syncUsername, months, timeClass, progressHandler, gameLimit);
-      const gamesForAnalysis = games
+      const currentReport = report;
+      const isLatestRefresh = Boolean(options.keepCurrentReport && currentReport);
+      const syncMonths = isLatestRefresh ? 1 : months;
+      const syncLimit = isLatestRefresh ? Math.max(gameLimit, 50) : gameLimit;
+      const games = await fetchChessComGames(syncUsername, syncMonths, timeClass, progressHandler, syncLimit);
+      const knownUrls = new Set((isLatestRefresh ? currentReport?.gameSummaries ?? [] : []).map(game => game.url).filter(Boolean));
+      const newGames = isLatestRefresh ? games.filter(game => !game.url || !knownUrls.has(game.url)) : games;
+
+      if (isLatestRefresh && !newGames.length) {
+        setSyncMeta({
+          status: "idle",
+          source: "chesscom",
+          lastSyncedAt: Date.now(),
+          message: `Already up to date (${currentReport?.games ?? 0} games)`,
+        });
+        return;
+      }
+
+      const gamesForAnalysis = newGames
         .slice()
         .sort((a, b) => (a.end_time ?? 0) - (b.end_time ?? 0))
-        .slice(-gameLimit);
-      progressHandler?.({ label: `Analyzing ${gamesForAnalysis.length} games`, done: 1, total: 1 });
-      const nextReport = await analyzeGamesInWorker({ kind: "chesscom", username: syncUsername, games: gamesForAnalysis }, controller.signal);
+        .slice(-syncLimit);
+      progressHandler?.({ label: `Analyzing ${isLatestRefresh ? "new" : gamesForAnalysis.length} games`, done: 1, total: 1 });
+      const nextReport = isLatestRefresh && currentReport
+        ? await analyzeGamesInWorker({
+          kind: "pgn",
+          username: syncUsername,
+          pgnText: [...currentReport.gameSummaries.map(game => game.pgn), ...gamesForAnalysis.map(game => game.pgn)].join("\n\n"),
+        }, controller.signal)
+        : await analyzeGamesInWorker({ kind: "chesscom", username: syncUsername, games: gamesForAnalysis }, controller.signal);
       setReport(nextReport);
       setSelectedIssue(nextReport.summaries[0]?.examples[0] ?? null);
       setQualityFilter("all");
@@ -258,7 +283,7 @@ export default function App() {
         status: "idle",
         source: "chesscom",
         lastSyncedAt: Date.now(),
-        message: `Synced ${nextReport.games} games`,
+        message: isLatestRefresh ? `Added ${gamesForAnalysis.length} new game${gamesForAnalysis.length === 1 ? "" : "s"}` : `Synced ${nextReport.games} games`,
       });
       if (!nextReport.games) setError("No standard chess games matched that username and filter.");
     } catch (err) {
@@ -270,7 +295,7 @@ export default function App() {
       }
     } finally {
       if (analysisAbortRef.current === controller) analysisAbortRef.current = null;
-      setLoading(false);
+      if (!options.silent) setLoading(false);
       if (!options.silent) window.setTimeout(() => setProgress(null), 700);
     }
   }
@@ -839,9 +864,6 @@ function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHig
     <section className="dashboard restored-dashboard">
       <div className="dashboard-actions">
         <button className="primary-button" onClick={trainNow}><Dumbbell size={16} /> Drill mode</button>
-        <button className="ghost-button" onClick={() => openAnalysis(selectedIssue?.fenBefore, selectedIssue?.color === "black", selectedIssue?.title)} disabled={!selectedIssue}>
-          <Search size={16} /> Analyze position
-        </button>
       </div>
 
       <div className="metric-grid">
@@ -1277,6 +1299,7 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
             evalCp={boardEvalCp}
             mate={boardEvalMate}
             lastMove={boardLastMove}
+            onAnalyze={() => openAnalysis(boardFen, review.color === "black", `${review.san}`, { gamePgn: game?.pgn })}
             size={760}
           />
           <div className="sheet-move-compare">
@@ -1324,7 +1347,6 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
 
         <div className="sheet-actions">
           {prev && <button className="ghost-button" onClick={prev}><ChevronLeft size={16} /> Prev</button>}
-          <button className="ghost-button" onClick={() => openAnalysis(review.fenBefore, review.color === "black", `${review.san}`, { gamePgn: game?.pgn })}><Search size={16} /> Analyze</button>
           <button className="primary-button" onClick={train}><Sword size={16} /> Train</button>
           {next && <button className="ghost-button" onClick={next}>Next <ChevronRight size={16} /></button>}
         </div>
