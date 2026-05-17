@@ -8,9 +8,9 @@ import {
 } from "lucide-react";
 import { fetchChessComGames, fetchChessComProfile, ImportProgress } from "./analysis/chesscom";
 import type { AnalysisReport, GameSummary, MoveIssue, MoveReview, MoveReviewQuality, PatternSummary, Phase, SkillDimension, TrainingRecommendation } from "./analysis/patterns";
-import ChessBoard from "./components/ChessBoard";
+import BoardFrame from "./components/BoardFrame";
 import DrillPanel from "./components/DrillPanel";
-import EngineReadout, { formatEval as formatEngineEval, formatUci as formatEngineUci } from "./components/EngineReadout";
+import { formatEval as formatEngineEval, formatUci as formatEngineUci } from "./components/EngineReadout";
 import { EngineEvaluation, useStockfish } from "./engine/useStockfish";
 import { classifyMoveQuality, DEFAULT_ENGINE_DEPTH, DEFAULT_ENGINE_MULTIPV, type MoveEngineResult } from "./engine/EngineService";
 import { isPlaceholderUsername, normalizeStoredProfile, shouldAutoSyncProfile } from "./appPersistence";
@@ -874,7 +874,7 @@ function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHig
         <div className="trainer-panel board-panel">
           <div className="panel-heading"><Target size={16} /><h2>Position lens</h2></div>
           <div className="dashboard-board-frame">
-            <ChessBoard
+            <BoardFrame
               fen={selectedIssue?.fenAfter || selectedIssue?.fenBefore}
               flipped={selectedIssue?.color === "black"}
               highlightSquares={boardHighlights}
@@ -1001,6 +1001,7 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
   const [qualityFilter, setQualityFilter] = useState<TrainableReviewBucket | "all">("all");
   const [timeFilter, setTimeFilter] = useState<string>("all");
   const [sortMode, setSortMode] = useState<"latest" | "severity">("latest");
+  const [visibleLimit, setVisibleLimit] = useState(80);
   const filterCounts = useMemo(() => {
     const base = report.moveReviews
       .filter(review => timeFilter === "all" || review.timeClass === timeFilter)
@@ -1013,17 +1014,17 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
       mistake: base.filter(review => qualityBucket(review.quality) === "mistake").length,
     };
   }, [report.moveReviews, timeFilter, selectedPatternId]);
-  const reviews = useMemo(() => report.moveReviews
+  const allReviews = useMemo(() => report.moveReviews
       .filter(review => timeFilter === "all" || review.timeClass === timeFilter)
       .filter(review => selectedPatternId === "all" || review.issueIds.includes(selectedPatternId as any))
       .filter(review => qualityFilter === "all" || qualityBucket(review.quality) === qualityFilter)
       .filter(review => review.issueIds.length)
       .sort((a, b) => sortMode === "latest"
         ? (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId) || (b.engineEvalLoss ?? b.severity) - (a.engineEvalLoss ?? a.severity)
-        : (b.engineEvalLoss ?? b.severity) - (a.engineEvalLoss ?? a.severity) || (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId))
-      .slice(0, 80),
+        : (b.engineEvalLoss ?? b.severity) - (a.engineEvalLoss ?? a.severity) || (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId)),
     [report.moveReviews, timeFilter, selectedPatternId, qualityFilter, sortMode]
   );
+  const reviews = useMemo(() => allReviews.slice(0, visibleLimit), [allReviews, visibleLimit]);
   const issueForReview = (review: MoveReview): MoveIssue | null => {
     const exact = report.issues.find(issue => issue.fenBefore === review.fenBefore && (issue.san === review.san || issue.uci === review.uci));
     if (exact) return exact;
@@ -1070,6 +1071,10 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
     }
   }, [filterCounts, qualityFilter]);
 
+  useEffect(() => {
+    setVisibleLimit(80);
+  }, [qualityFilter, selectedPatternId, sortMode, timeFilter]);
+
   const selectedGame = selectedReview ? report.gameSummaries.find(game => game.id === selectedReview.gameId) : undefined;
 
   return (
@@ -1077,7 +1082,7 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
       <div className="mistake-lab-header">
         <div>
           <span className="eyebrow">Mistake Lab</span>
-          <h2>{reviews.length} {reviews.length === 1 ? "mistake" : "mistakes"}</h2>
+          <h2>{allReviews.length} {allReviews.length === 1 ? "mistake" : "mistakes"}</h2>
         </div>
         <button className="primary-button" onClick={() => startDrill(qualityFilter, selectedPatternId)} disabled={!reviews.length}>
           <Dumbbell size={16} /> Drill shown
@@ -1165,6 +1170,11 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
           </div>
         )}
       </div>
+      {visibleLimit < allReviews.length && (
+        <button className="load-more-mistakes" onClick={() => setVisibleLimit(limit => Math.min(limit + 80, allReviews.length))}>
+          Load more <span>{Math.min(visibleLimit, allReviews.length)} / {allReviews.length}</span>
+        </button>
+      )}
       {selectedReview && selectedReviewIssue && (
         <MistakeBottomSheet
           review={selectedReview}
@@ -1204,9 +1214,51 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
   const betterMove = review.engineBestMove || review.engineLines?.[0]?.bestMove || "";
   const bucket = qualityBucket(review.quality);
   const betterLabel = formatEngineUci(betterMove) || "Best line";
-  const [comparison, setComparison] = useState<"played" | "better">("played");
+  const { evaluatePosition } = useStockfish();
+  const [comparison, setComparison] = useState<"played" | "better" | "consequence">("played");
+  const [consequenceFen, setConsequenceFen] = useState(review.fenAfter);
+  const [consequenceMove, setConsequenceMove] = useState("");
+  const [consequenceEval, setConsequenceEval] = useState<EngineEvaluation | null>(null);
+
+  useEffect(() => {
+    if (comparison !== "consequence") return;
+    let cancelled = false;
+    setConsequenceFen(review.fenAfter);
+    setConsequenceMove("");
+    setConsequenceEval(null);
+    evaluatePosition(review.fenAfter, ENGINE_DEPTH).then(result => {
+      if (cancelled) return;
+      setConsequenceEval(result);
+      if (!result.bestMove) return;
+      const board = new Chess(review.fenAfter);
+      const reply = board.move({
+        from: result.bestMove.slice(0, 2),
+        to: result.bestMove.slice(2, 4),
+        promotion: result.bestMove[4] || "q",
+      });
+      if (!reply || cancelled) return;
+      setConsequenceMove(result.bestMove);
+      setConsequenceFen(board.fen());
+    });
+    return () => { cancelled = true; };
+  }, [comparison, evaluatePosition, review.fenAfter]);
+
   const playedArrow = { from: review.uci.slice(0, 2), to: review.uci.slice(2, 4), color: comparison === "played" ? "rgba(255,89,89,0.84)" : "rgba(255,89,89,0.30)" };
   const betterArrow = betterMove ? { from: betterMove.slice(0, 2), to: betterMove.slice(2, 4), color: comparison === "better" ? "rgba(183,226,107,0.88)" : "rgba(183,226,107,0.32)" } : null;
+  const consequenceArrow = consequenceMove ? { from: consequenceMove.slice(0, 2), to: consequenceMove.slice(2, 4), color: "rgba(255,205,92,0.86)" } : null;
+  const boardEvalCp = comparison === "played"
+    ? review.engineEvalAfter
+    : comparison === "better"
+      ? review.engineEvalBefore
+      : consequenceEval?.evalCp ?? review.engineEvalAfter;
+  const boardEvalMate = comparison === "consequence" ? consequenceEval?.mate : undefined;
+  const boardFen = comparison === "consequence" ? consequenceFen : review.fenBefore;
+  const boardLastMove = comparison === "consequence"
+    ? consequenceMove ? { from: consequenceMove.slice(0, 2), to: consequenceMove.slice(2, 4) } : { from: review.uci.slice(0, 2), to: review.uci.slice(2, 4) }
+    : undefined;
+  const boardArrows = comparison === "consequence"
+    ? [playedArrow, ...(consequenceArrow ? [consequenceArrow] : [])]
+    : [playedArrow, ...(betterArrow ? [betterArrow] : [])];
   return (
     <div className="mistake-sheet-backdrop" role="dialog" aria-modal="true" aria-label="Mistake details">
       <div className="mistake-sheet">
@@ -1222,10 +1274,13 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
         <MistakeEvalSwing review={review} />
 
         <div className="mistake-visual-card">
-          <ChessBoard
-            fen={review.fenBefore}
+          <BoardFrame
+            fen={boardFen}
             flipped={review.color === "black"}
-            arrows={[playedArrow, ...(betterArrow ? [betterArrow] : [])]}
+            evalCp={boardEvalCp}
+            mate={boardEvalMate}
+            lastMove={boardLastMove}
+            arrows={boardArrows}
             size={760}
           />
           <div className="sheet-move-compare">
@@ -1250,13 +1305,27 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
               <span>Better</span>
               <strong>{betterLabel}</strong>
             </button>
+            <button
+              type="button"
+              className={`consequence ${comparison === "consequence" ? "active" : ""}`}
+              onClick={() => setComparison("consequence")}
+              aria-pressed={comparison === "consequence"}
+              aria-label="Show consequence"
+            >
+              <span>Consequence</span>
+              <strong>{consequenceMove ? formatEngineUci(consequenceMove) : "Engine reply"}</strong>
+            </button>
           </div>
         </div>
 
         <div className="coach-why-card">
           <span className={`tag ${bucket}`}>{qualityLabel(review.quality)}</span>
           <strong>{issue.title}</strong>
-          <p>{coachMistakeCopy(review, issue, betterLabel)}</p>
+          <p>
+            {comparison === "consequence"
+              ? `${formatEngineUci(consequenceMove) || "The engine reply"} is the punishment after ${review.san}. The board is showing the consequence, not just explaining it.`
+              : coachMistakeCopy(review, issue, betterLabel)}
+          </p>
         </div>
 
         <div className="sheet-actions">
@@ -1424,10 +1493,10 @@ function MistakeDetail({ review, issue, game, back, next, prev, train, openAnaly
             <strong>{formatEngineUci(sourceBestMove) || "..."}</strong>
           </button>
         </div>
-        <SlimEvalBar evaluation={boardEval} flipped={review.color === "black"} />
-        <ChessBoard
+        <BoardFrame
           fen={boardFen}
           flipped={review.color === "black"}
+          evaluation={boardEval}
           lastMove={lastMove}
           arrows={storyArrows}
           size={620}
@@ -1521,10 +1590,10 @@ function AnalysisView({ start, back }: {
         <p>Move pieces, reset, and compare ideas directly on the board.</p>
       </div>
       <div className="analysis-board-area">
-        <SlimEvalBar evaluation={engineEval} flipped={boardFlipped} />
-        <ChessBoard
+        <BoardFrame
           fen={fen}
           flipped={boardFlipped}
+          evaluation={engineEval}
           interactive
           onMove={playMove}
           lastMove={lastMove}
@@ -1941,9 +2010,10 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
       </div>
 
       <div className="game-review-board">
-        <ChessBoard
+        <BoardFrame
           fen={playFen || selectedReview?.fenBefore}
           flipped={game.color === "black"}
+          evaluation={boardEval}
           interactive
           onMove={playMove}
           onGestureBack={() => {
@@ -1968,7 +2038,7 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
           onAnalyze={() => openAnalysis(playFen || selectedReview?.fenBefore, game.color === "black", game.opponent || "Game analysis", { gamePgn: game.pgn })}
           size={340}
         />
-        <EngineReadout evaluation={boardEval} ready={ready} error={error} flipped={game.color === "black"} />
+        <EngineSuggestions evaluation={boardEval} ready={ready} error={error} />
       </div>
 
       {selectedReview && (

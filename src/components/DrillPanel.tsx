@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Chess } from "chess.js";
 import { ArrowLeft, ArrowRight, RotateCw, Check, X, Cpu, Search, Lightbulb } from "lucide-react";
 import type { MoveIssue, MoveReviewQuality, PatternSummary } from "../analysis/patterns";
-import ChessBoard from "./ChessBoard";
+import BoardFrame from "./BoardFrame";
 import { EngineEvaluation, useStockfish } from "../engine/useStockfish";
 import { DEFAULT_ENGINE_DEPTH } from "../engine/EngineService";
 import { judgeDrillMove } from "../chess/drillEvaluator";
@@ -317,9 +317,10 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
       </div>
 
       <div className="drill-board-area">
-        <ChessBoard
+        <BoardFrame
           fen={currentFen || issue.fenBefore}
           flipped={issue.color === "black"}
+          evaluation={engineEval}
           highlightSquares={highlights}
           lastMove={lastMove}
           arrows={(feedback === "wrong" || feedback === "correct" || feedback === "theory") && bestMove ? [{ from: bestMove.slice(0, 2), to: bestMove.slice(2, 4), color: feedback === "wrong" ? "rgba(230,79,79,0.72)" : "rgba(22,163,74,0.72)" }] : undefined}
