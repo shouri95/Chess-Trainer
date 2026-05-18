@@ -439,11 +439,7 @@ export default function App() {
             {activeView === "dashboard" && (
               <Dashboard
                 report={report}
-                selectedIssue={selectedIssue}
-                setSelectedIssue={setSelectedIssue}
                 topPhase={topPhase}
-                boardHighlights={boardHighlights}
-                openAnalysis={openAnalysis}
                 openGame={(gameId) => {
                   setSelectedGameId(gameId);
                   setActiveView("games");
@@ -897,12 +893,11 @@ function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, set
   );
 }
 
-function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHighlights, openQuality, trainNow, openAnalysis, syncMeta, openGame, openMistakes }: {
-  report: AnalysisReport; selectedIssue: MoveIssue | null; setSelectedIssue: (i: MoveIssue) => void;
-  topPhase: Phase; boardHighlights: Record<string, string>;
+function Dashboard({ report, topPhase, openQuality, trainNow, syncMeta, openGame, openMistakes }: {
+  report: AnalysisReport;
+  topPhase: Phase;
   openQuality: (quality: MoveReviewQuality) => void;
   trainNow: () => void;
-  openAnalysis: (fen?: string, flipped?: boolean, title?: string) => void;
   syncMeta: SyncMeta;
   openGame: (gameId: number) => void;
   openMistakes: () => void;
@@ -914,7 +909,6 @@ function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHig
   const criticalCount = trainableReviews.length;
   const blunderCount = report.moveReviews.filter(review => qualityBucket(review.quality) === "blunder").length;
   const topSummary = report.summaries[0];
-  const focusIssue = selectedIssue || topSummary?.examples[0] || report.issues[0] || null;
   const recentGames = report.gameSummaries
     .slice()
     .sort((a, b) => (b.endTime ?? b.id) - (a.endTime ?? a.id))
@@ -959,41 +953,16 @@ function Dashboard({ report, selectedIssue, setSelectedIssue, topPhase, boardHig
         </div>
       </section>
 
-      <section className="dashboard-focus-grid">
-        <div className="dashboard-insight-card">
-          <div className="dashboard-section-title">
-            <span>Profile</span>
-            <strong>{topPhase}</strong>
-          </div>
+      <section className="dashboard-insight-card">
+        <div className="dashboard-section-title">
+          <span>Profile</span>
+          <strong>{topPhase}</strong>
+        </div>
+        <div className="profile-summary-grid">
           <div className="strength-row good"><span>Strongest</span><strong>{strongest}</strong></div>
           <div className="strength-row bad"><span>Needs work</span><strong>{weakest}</strong></div>
-          {topSummary && <PhaseBars summary={topSummary} />}
         </div>
-
-        <div className="dashboard-lens-card">
-          <div className="dashboard-section-title">
-            <span>Key Position</span>
-            {focusIssue && <strong>{qualityLabel(focusIssue.quality)}</strong>}
-          </div>
-          {focusIssue ? (
-            <>
-              <BoardFrame
-                fen={focusIssue.fenAfter || focusIssue.fenBefore}
-                flipped={focusIssue.color === "black"}
-                highlightSquares={boardHighlights}
-                onAnalyze={() => openAnalysis(focusIssue.fenBefore, focusIssue.color === "black", focusIssue.title)}
-                size={360}
-              />
-              <button className="dashboard-position-row" onClick={() => setSelectedIssue(focusIssue)}>
-                <span>{focusIssue.phase}</span>
-                <strong>{focusIssue.san}</strong>
-                <b>{focusIssue.title}</b>
-              </button>
-            </>
-          ) : (
-            <p>No key position yet.</p>
-          )}
-        </div>
+        {topSummary && <PhaseBars summary={topSummary} />}
       </section>
 
       <section className="dashboard-games-card">
@@ -1335,6 +1304,15 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
       ? buildMoveLine(review.fenBefore, betterMoves)
       : buildMoveLine(review.fenAfter, consequenceMoves);
   const activeStep = activeLine[Math.min(lineIndex, Math.max(activeLine.length - 1, 0))];
+  const mistakeArrows = useMemo(() => {
+    if (comparison === "consequence") return undefined;
+    const arrows = [{ from: review.uci.slice(0, 2), to: review.uci.slice(2, 4), color: "rgba(230,79,79,0.76)" }];
+    const best = betterMoves[0] || betterMove;
+    if (/^[a-h][1-8][a-h][1-8]/.test(best)) {
+      arrows.push({ from: best.slice(0, 2), to: best.slice(2, 4), color: "rgba(183,226,107,0.72)" });
+    }
+    return arrows;
+  }, [betterMove, betterMoves, comparison, review.uci]);
   const boardEvalCp = comparison === "played"
     ? review.engineEvalAfter
     : comparison === "better"
@@ -1365,6 +1343,7 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
             evalCp={boardEvalCp}
             mate={boardEvalMate}
             lastMove={boardLastMove}
+            arrows={mistakeArrows}
             onAnalyze={() => openAnalysis(boardFen, review.color === "black", `${review.san}`, { gamePgn: game?.pgn })}
             size={760}
           />
@@ -2095,9 +2074,6 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
     <section className="games-screen mobile-screen">
       <div className="detail-topbar">
         <button className="ghost-button" onClick={() => setSelectedGameId(-1)}><ArrowLeft size={16} /> Games</button>
-        <button className="ghost-button" onClick={() => openAnalysis(currentFen, game.color === "black", game.opponent || "Game analysis", { gamePgn: game.pgn })}>
-          <Search size={16} /> Analyze
-        </button>
         <button className={`ghost-button ${showReport ? "active" : ""}`} onClick={() => setShowReport(value => !value)} aria-label="Request game analysis">
           <BarChart3 size={16} /> {showReport ? "Board" : "Request"}
         </button>
@@ -2186,6 +2162,7 @@ type GameSideStats = {
   castles: number;
   critical: number;
   best: number;
+  quality: Record<MoveReviewQuality, number>;
   avgLoss: number | null;
   reviewScore: number | null;
 };
@@ -2193,7 +2170,6 @@ type GameSideStats = {
 type GameReportModel = {
   white: GameSideStats;
   black: GameSideStats;
-  graph: Array<{ ply: number; evalCp: number; quality?: MoveReviewQuality; label: string }>;
   decisiveMoment?: GameTimelineMove;
 };
 
@@ -2244,11 +2220,10 @@ function buildGameReportModel(game: GameSummary, timeline: GameTimelineMove[], r
   const blackName = headers.Black || (game.color === "black" ? "You" : game.opponent || "Opponent");
   const white = buildSideStats("white", whiteName, timeline, reviews);
   const black = buildSideStats("black", blackName, timeline, reviews);
-  const graph = buildGameEvalGraph(timeline);
   const decisiveMoment = timeline
     .filter(move => move.review && isTrainableQuality(move.review.quality))
     .sort((a, b) => reviewLossCp(b.review!) - reviewLossCp(a.review!))[0];
-  return { white, black, graph, decisiveMoment };
+  return { white, black, decisiveMoment };
 }
 
 function buildSideStats(color: "white" | "black", name: string, timeline: GameTimelineMove[], reviews: MoveReview[]): GameSideStats {
@@ -2267,19 +2242,17 @@ function buildSideStats(color: "white" | "black", name: string, timeline: GameTi
     castles: moves.filter(move => move.san === "O-O" || move.san === "O-O-O").length,
     critical: sideReviews.filter(review => isTrainableQuality(review.quality)).length,
     best: sideReviews.filter(review => review.quality === "best" || review.quality === "good").length,
+    quality: countReviewQualities(sideReviews),
     avgLoss,
     reviewScore,
   };
 }
 
-function buildGameEvalGraph(timeline: GameTimelineMove[]) {
-  const graph: Array<{ ply: number; evalCp: number; quality?: MoveReviewQuality; label: string }> = [{ ply: 0, evalCp: 0, label: "Start" }];
-  let lastEval = 0;
-  for (const move of timeline) {
-    if (typeof move.review?.engineEvalAfter === "number") lastEval = move.review.engineEvalAfter;
-    graph.push({ ply: move.ply, evalCp: lastEval, quality: move.review?.quality, label: move.san });
-  }
-  return graph;
+function countReviewQualities(reviews: MoveReview[]) {
+  return reviews.reduce<Record<MoveReviewQuality, number>>((counts, review) => {
+    counts[review.quality] += 1;
+    return counts;
+  }, { blunder: 0, miss: 0, mistake: 0, inaccuracy: 0, good: 0, best: 0 });
 }
 
 function gameHeaders(pgn: string) {
@@ -2313,58 +2286,52 @@ function GamePlayerStrip({ game }: { game: GameSummary }) {
 function GameReportPanel({ report, playerColor }: { report: GameReportModel; playerColor: "white" | "black" }) {
   const player = playerColor === "white" ? report.white : report.black;
   const opponent = playerColor === "white" ? report.black : report.white;
+  const rows = [
+    { label: "Accuracy", player: player.reviewScore === null ? "-" : `${player.reviewScore}`, opponent: opponent.reviewScore === null ? "-" : `${opponent.reviewScore}` },
+    { label: "Best", player: player.quality.best, opponent: opponent.quality.best },
+    { label: "Good", player: player.quality.good, opponent: opponent.quality.good },
+    { label: "Inaccuracy", player: player.quality.inaccuracy, opponent: opponent.quality.inaccuracy },
+    { label: "Mistake", player: player.quality.mistake, opponent: opponent.quality.mistake },
+    { label: "Miss", player: player.quality.miss, opponent: opponent.quality.miss },
+    { label: "Blunder", player: player.quality.blunder, opponent: opponent.quality.blunder },
+    { label: "Captures", player: player.captures, opponent: opponent.captures },
+    { label: "Checks", player: player.checks, opponent: opponent.checks },
+    { label: "Castled", player: player.castles ? "Yes" : "No", opponent: opponent.castles ? "Yes" : "No" },
+  ];
   return (
     <section className="game-report-panel">
       <div className="dashboard-section-title">
-        <span>Game Report</span>
+        <span>Game Review</span>
         {report.decisiveMoment && <strong>{report.decisiveMoment.moveNumber}. {report.decisiveMoment.san}</strong>}
       </div>
-      <GameEvalGraph points={report.graph} />
-      <div className="game-report-columns">
-        <GameStatsColumn title="You" stats={player} />
-        <GameStatsColumn title="Opponent" stats={opponent} />
+      <div className="game-review-score-row">
+        <GameScorePill title="You" stats={player} />
+        <GameScorePill title="Opponent" stats={opponent} />
+      </div>
+      <div className="game-review-table" role="table" aria-label="Game review comparison">
+        <div className="game-review-table-head" role="row">
+          <span role="columnheader">Move</span>
+          <strong role="columnheader">You</strong>
+          <strong role="columnheader">Opponent</strong>
+        </div>
+        {rows.map(row => (
+          <div key={row.label} className={row.label.toLowerCase()} role="row">
+            <span role="cell">{row.label}</span>
+            <strong role="cell">{row.player}</strong>
+            <strong role="cell">{row.opponent}</strong>
+          </div>
+        ))}
       </div>
     </section>
   );
 }
 
-function GameStatsColumn({ title, stats }: { title: string; stats: GameSideStats }) {
+function GameScorePill({ title, stats }: { title: string; stats: GameSideStats }) {
   return (
-    <div className="game-stats-column">
+    <div className="game-score-pill">
       <span>{title}</span>
       <strong>{stats.name}</strong>
-      <dl>
-        <div><dt>Review</dt><dd>{stats.reviewScore === null ? "-" : stats.reviewScore}</dd></div>
-        <div><dt>Critical</dt><dd>{stats.critical}</dd></div>
-        <div><dt>Best/Good</dt><dd>{stats.best}</dd></div>
-        <div><dt>Captures</dt><dd>{stats.captures}</dd></div>
-        <div><dt>Checks</dt><dd>{stats.checks}</dd></div>
-        <div><dt>Castled</dt><dd>{stats.castles ? "Yes" : "No"}</dd></div>
-      </dl>
-    </div>
-  );
-}
-
-function GameEvalGraph({ points }: { points: GameReportModel["graph"] }) {
-  const width = 320;
-  const height = 104;
-  const maxPly = Math.max(1, points[points.length - 1]?.ply || 1);
-  const path = points.map((point, index) => {
-    const x = (point.ply / maxPly) * width;
-    const y = 52 - Math.max(-1, Math.min(1, point.evalCp / 600)) * 42;
-    return `${index === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
-  return (
-    <div className="game-eval-graph">
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Evaluation graph">
-        <line x1="0" y1="52" x2={width} y2="52" />
-        <path d={path} />
-        {points.filter(point => point.quality && isTrainableQuality(point.quality)).map(point => {
-          const x = (point.ply / maxPly) * width;
-          const y = 52 - Math.max(-1, Math.min(1, point.evalCp / 600)) * 42;
-          return <circle key={`${point.ply}-${point.label}`} cx={x} cy={y} r="3.5" />;
-        })}
-      </svg>
+      <b>{stats.reviewScore === null ? "-" : stats.reviewScore}</b>
     </div>
   );
 }

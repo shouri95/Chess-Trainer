@@ -3048,7 +3048,6 @@ textarea {
 .dashboard-command-card,
 .dashboard-quality-card,
 .dashboard-insight-card,
-.dashboard-lens-card,
 .dashboard-games-card,
 .game-report-panel {
   border: 1px solid var(--border);
@@ -3080,8 +3079,7 @@ textarea {
 
 .dashboard-command-actions,
 .dashboard-kpi-grid,
-.dashboard-focus-grid,
-.game-report-columns {
+.dashboard-focus-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
@@ -3105,7 +3103,7 @@ textarea {
 .dashboard-kpi span,
 .dashboard-section-title span,
 .strength-row span,
-.game-stats-column > span {
+.game-score-pill > span {
   color: var(--text-muted);
   font-size: 0.66rem;
   font-weight: 900;
@@ -3130,7 +3128,6 @@ textarea {
 
 .dashboard-quality-card,
 .dashboard-insight-card,
-.dashboard-lens-card,
 .dashboard-games-card,
 .game-report-panel {
   display: grid;
@@ -3213,42 +3210,9 @@ textarea {
 .strength-row.good strong { color: var(--accent); }
 .strength-row.bad strong { color: #ffb36b; }
 
-.dashboard-lens-card .universal-board-frame {
-  width: 100%;
-}
-
-.dashboard-position-row {
+.profile-summary-grid {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-  min-height: 42px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg);
-  color: var(--text-primary);
-  padding: 8px 10px;
-  text-align: left;
-}
-
-.dashboard-position-row span {
-  color: var(--text-muted);
-  font-size: 0.64rem;
-  font-weight: 900;
-  text-transform: uppercase;
-}
-
-.dashboard-position-row strong {
-  font-family: "JetBrains Mono", monospace;
-}
-
-.dashboard-position-row b {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.78rem;
-  color: var(--text-secondary);
+  gap: 10px;
 }
 
 .dashboard-game-list {
@@ -3441,85 +3405,90 @@ textarea {
 .game-move-strip button.inaccuracy { border-color: rgba(224,168,59,0.44); }
 .game-move-strip button.miss { border-color: rgba(240,139,95,0.48); }
 
-.game-report-panel {
-  gap: 12px;
+.game-review-score-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.game-eval-graph {
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: #070906;
-}
-
-.game-eval-graph svg {
-  display: block;
-  width: 100%;
-  height: 112px;
-}
-
-.game-eval-graph line {
-  stroke: rgba(255,255,255,0.14);
-  stroke-width: 1;
-}
-
-.game-eval-graph path {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 2.4;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.game-eval-graph circle {
-  fill: var(--bad);
-  stroke: #070906;
-  stroke-width: 1.5;
-}
-
-.game-stats-column {
+.game-score-pill {
   min-width: 0;
   display: grid;
-  gap: 8px;
+  gap: 4px;
+  align-content: center;
+  min-height: 86px;
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--bg);
 }
 
-.game-stats-column > strong {
+.game-score-pill span,
+.game-review-table span {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.game-score-pill strong {
   min-width: 0;
   overflow: hidden;
-  color: var(--text-primary);
-  font-size: 0.9rem;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.game-stats-column dl {
+.game-score-pill b {
+  color: var(--text-primary);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 1.55rem;
+  line-height: 1;
+}
+
+.game-review-table {
   display: grid;
-  gap: 6px;
-  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
 }
 
-.game-stats-column dl div {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.game-review-table > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px 74px;
   gap: 8px;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 12px;
+  border-top: 1px solid rgba(255,255,255,0.06);
 }
 
-.game-stats-column dt {
-  color: var(--text-muted);
-  font-size: 0.68rem;
+.game-review-table > div:first-child {
+  border-top: 0;
 }
 
-.game-stats-column dd {
-  margin: 0;
+.game-review-table-head {
+  background: rgba(255,255,255,0.035);
+}
+
+.game-review-table strong {
   color: var(--text-primary);
   font-family: "JetBrains Mono", monospace;
   font-size: 0.78rem;
-  font-weight: 900;
+  text-align: right;
+}
+
+.game-review-table .blunder strong,
+.game-review-table .mistake strong,
+.game-review-table .miss strong {
+  color: #ff8b8b;
+}
+
+.game-review-table .best strong,
+.game-review-table .good strong {
+  color: var(--accent);
 }
 
 @media (min-width: 431px) {
