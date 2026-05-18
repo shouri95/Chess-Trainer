@@ -2034,7 +2034,7 @@ textarea {
 .game-library-list button {
   min-height: 84px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px 12px;
   align-items: center;
   border: 1px solid var(--border);
@@ -2076,6 +2076,10 @@ textarea {
   background: rgba(230,79,79,0.14);
   color: var(--bad);
   font-family: "JetBrains Mono", monospace;
+}
+
+.game-library-list b {
+  display: none;
 }
 
 .game-library-list small {
@@ -3445,6 +3449,68 @@ textarea {
   font-family: "JetBrains Mono", monospace;
   font-size: 1.55rem;
   line-height: 1;
+}
+
+.move-quality-bars {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.move-quality-bars > div {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr) 48px;
+  gap: 8px;
+  align-items: center;
+}
+
+.move-quality-bars span {
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.move-quality-bars strong {
+  color: var(--text-secondary);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.bar-pair {
+  display: grid;
+  gap: 3px;
+}
+
+.bar-pair i {
+  display: block;
+  height: 7px;
+  min-width: 4px;
+  border-radius: 999px;
+}
+
+.bar-pair .you {
+  background: var(--accent);
+}
+
+.bar-pair .opponent {
+  background: rgba(232,225,198,0.62);
+}
+
+.move-quality-bars .blunder .you,
+.move-quality-bars .miss .you,
+.move-quality-bars .mistake .you {
+  background: #ff8b8b;
+}
+
+.move-quality-bars .blunder .opponent,
+.move-quality-bars .miss .opponent,
+.move-quality-bars .mistake .opponent {
+  background: rgba(255,139,139,0.42);
 }
 
 .game-review-table {

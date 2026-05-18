@@ -1999,6 +1999,7 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
   const [timeFilter, setTimeFilter] = useState("all");
   const [selectedPly, setSelectedPly] = useState(0);
   const [showReport, setShowReport] = useState(false);
+  const [analysisRequested, setAnalysisRequested] = useState(false);
   const sortedGames = useMemo(
     () => report.gameSummaries
       .filter(game => timeFilter === "all" || game.timeClass === timeFilter)
@@ -2013,20 +2014,13 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
   const selectedMove = selectedPly > 0 ? timeline[Math.min(selectedPly - 1, timeline.length - 1)] : null;
   const currentFen = selectedMove?.fenAfter || initialFen;
   const currentReview = selectedMove?.review || null;
-  const gameReport = useMemo(() => game ? buildGameReportModel(game, timeline, reviews) : null, [game, timeline, reviews]);
+  const gameReport = useMemo(() => game && analysisRequested ? buildGameReportModel(game, timeline, reviews) : null, [analysisRequested, game, timeline, reviews]);
 
   useEffect(() => {
     setSelectedPly(0);
     setShowReport(false);
+    setAnalysisRequested(false);
   }, [selectedGameId]);
-
-  const qualityCountsForGame = (id: number) => {
-    const gameReviews = report.moveReviews.filter(review => review.gameId === id);
-    return {
-      critical: gameReviews.filter(review => ["blunder", "miss", "mistake"].includes(review.quality)).length,
-      reviewed: gameReviews.length,
-    };
-  };
 
   if (!game) {
     return (
@@ -2057,7 +2051,6 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
               <strong>{summary.opponent || "Unknown opponent"}</strong>
               <span>{[summary.timeClass, summary.opening || summary.result].filter(Boolean).join(" • ") || "Game review"}</span>
             </div>
-            <b>{qualityCountsForGame(summary.id).critical}</b>
             <small>{summary.endTime ? new Date(summary.endTime * 1000).toLocaleDateString() : "PGN"} · {summary.moveCount} moves · {summary.color}</small>
           </button>
         ))}
@@ -2074,8 +2067,19 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
     <section className="games-screen mobile-screen">
       <div className="detail-topbar">
         <button className="ghost-button" onClick={() => setSelectedGameId(-1)}><ArrowLeft size={16} /> Games</button>
-        <button className={`ghost-button ${showReport ? "active" : ""}`} onClick={() => setShowReport(value => !value)} aria-label="Request game analysis">
-          <BarChart3 size={16} /> {showReport ? "Board" : "Request"}
+        <button
+          className={`ghost-button ${showReport ? "active" : ""}`}
+          onClick={() => {
+            if (!analysisRequested) {
+              setAnalysisRequested(true);
+              setShowReport(true);
+              return;
+            }
+            setShowReport(value => !value);
+          }}
+          aria-label="Request game analysis"
+        >
+          <BarChart3 size={16} /> {!analysisRequested ? "Request" : showReport ? "Board" : "Report"}
         </button>
       </div>
 
@@ -2083,8 +2087,8 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
         <h2>{game.opponent || "Unknown opponent"}</h2>
         <p>{[game.timeClass, game.opening || game.result].filter(Boolean).join(" • ")}</p>
         <div className="detail-game-meta">
-          <span>{game.issues} flagged</span>
-          <span>{reviews.length} reviewed moves</span>
+          <span>{game.moveCount} moves</span>
+          <span>{analysisRequested ? `${reviews.length} reviewed` : "Replay only"}</span>
           {game.endTime && <span>{new Date(game.endTime * 1000).toLocaleDateString()}</span>}
         </div>
       </div>
@@ -2094,7 +2098,7 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
         <BoardFrame
           fen={currentFen}
           flipped={game.color === "black"}
-          evalCp={currentReview?.engineEvalAfter}
+          evalCp={analysisRequested ? currentReview?.engineEvalAfter : undefined}
           lastMove={selectedMove?.lastMove}
           onGestureBack={() => jumpBy(-1)}
           onGestureForward={() => jumpBy(1)}
@@ -2114,7 +2118,7 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
         <GameReportPanel report={gameReport} playerColor={game.color} />
       )}
 
-      {currentReview && !showReport && (
+      {analysisRequested && currentReview && !showReport && (
         <div className="selected-move-panel compact">
           <div><span>{currentReview.color === game.color ? "You played" : "Move"}</span><strong>{currentReview.san}</strong></div>
           <div><span>Better</span><strong>{formatEngineUci(currentReview.engineBestMove || currentReview.engineLines?.[0]?.bestMove) || "-"}</strong></div>
@@ -2128,9 +2132,9 @@ function GamesView({ report, selectedGameId, setSelectedGameId, openMove, openAn
         {timeline.map(move => (
           <button
             key={`${move.ply}-${move.uci}`}
-            className={`${selectedPly === move.ply ? "active" : ""} ${move.review ? qualityBucket(move.review.quality) : ""} ${move.color === (game.color === "white" ? "w" : "b") ? "user-move" : ""}`.trim()}
+            className={`${selectedPly === move.ply ? "active" : ""} ${analysisRequested && move.review ? qualityBucket(move.review.quality) : ""} ${move.color === (game.color === "white" ? "w" : "b") ? "user-move" : ""}`.trim()}
             onClick={() => setSelectedPly(move.ply)}
-            onDoubleClick={() => move.review && openMove(move.review)}
+            onDoubleClick={() => analysisRequested && move.review && openMove(move.review)}
           >
             {move.moveNumber}. {move.color === "b" ? "..." : ""}{move.san}
           </button>
@@ -2287,13 +2291,6 @@ function GameReportPanel({ report, playerColor }: { report: GameReportModel; pla
   const player = playerColor === "white" ? report.white : report.black;
   const opponent = playerColor === "white" ? report.black : report.white;
   const rows = [
-    { label: "Accuracy", player: player.reviewScore === null ? "-" : `${player.reviewScore}`, opponent: opponent.reviewScore === null ? "-" : `${opponent.reviewScore}` },
-    { label: "Best", player: player.quality.best, opponent: opponent.quality.best },
-    { label: "Good", player: player.quality.good, opponent: opponent.quality.good },
-    { label: "Inaccuracy", player: player.quality.inaccuracy, opponent: opponent.quality.inaccuracy },
-    { label: "Mistake", player: player.quality.mistake, opponent: opponent.quality.mistake },
-    { label: "Miss", player: player.quality.miss, opponent: opponent.quality.miss },
-    { label: "Blunder", player: player.quality.blunder, opponent: opponent.quality.blunder },
     { label: "Captures", player: player.captures, opponent: opponent.captures },
     { label: "Checks", player: player.checks, opponent: opponent.checks },
     { label: "Castled", player: player.castles ? "Yes" : "No", opponent: opponent.castles ? "Yes" : "No" },
@@ -2308,9 +2305,10 @@ function GameReportPanel({ report, playerColor }: { report: GameReportModel; pla
         <GameScorePill title="You" stats={player} />
         <GameScorePill title="Opponent" stats={opponent} />
       </div>
+      <MoveQualityBarGraph player={player} opponent={opponent} />
       <div className="game-review-table" role="table" aria-label="Game review comparison">
         <div className="game-review-table-head" role="row">
-          <span role="columnheader">Move</span>
+          <span role="columnheader">Stat</span>
           <strong role="columnheader">You</strong>
           <strong role="columnheader">Opponent</strong>
         </div>
@@ -2323,6 +2321,32 @@ function GameReportPanel({ report, playerColor }: { report: GameReportModel; pla
         ))}
       </div>
     </section>
+  );
+}
+
+function MoveQualityBarGraph({ player, opponent }: { player: GameSideStats; opponent: GameSideStats }) {
+  const rows: Array<{ key: MoveReviewQuality; label: string }> = [
+    { key: "best", label: "Best" },
+    { key: "good", label: "Good" },
+    { key: "inaccuracy", label: "Inaccuracy" },
+    { key: "mistake", label: "Mistake" },
+    { key: "miss", label: "Miss" },
+    { key: "blunder", label: "Blunder" },
+  ];
+  const max = Math.max(1, ...rows.flatMap(row => [player.quality[row.key], opponent.quality[row.key]]));
+  return (
+    <div className="move-quality-bars" aria-label="Move quality bar graph">
+      {rows.map(row => (
+        <div key={row.key} className={row.key}>
+          <span>{row.label}</span>
+          <div className="bar-pair">
+            <i className="you" style={{ width: `${Math.max(4, (player.quality[row.key] / max) * 100)}%` }} />
+            <i className="opponent" style={{ width: `${Math.max(4, (opponent.quality[row.key] / max) * 100)}%` }} />
+          </div>
+          <strong>{player.quality[row.key]} / {opponent.quality[row.key]}</strong>
+        </div>
+      ))}
+    </div>
   );
 }
 
