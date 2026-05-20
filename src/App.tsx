@@ -14,6 +14,7 @@ import { formatEval as formatEngineEval, formatUci as formatEngineUci } from "./
 import { EngineEvaluation, useStockfish } from "./engine/useStockfish";
 import { classifyMoveQuality, DEFAULT_ENGINE_DEPTH, DEFAULT_ENGINE_MULTIPV, type MoveEngineResult } from "./engine/EngineService";
 import { isPlaceholderUsername, normalizeStoredProfile, shouldAutoSyncProfile } from "./appPersistence";
+import { ExactMobileImport, ExactPatternCoachMobile } from "./ExactMobileShell";
 
 const samplePgn = `[Event "Training sample"]
 [Site "https://www.chess.com/game/live/sample"]
@@ -416,120 +417,114 @@ export default function App() {
     }
   }
 
+  const navigateView = (view: "dashboard" | "games" | "mistakes" | "drill" | "analysis") => {
+    if (view === "drill") {
+      setDrillStartInPuzzle(false);
+      setDrillLaunchKey(key => key + 1);
+    }
+    setActiveView(view);
+  };
+
   return (
     <ErrorBoundary>
-    <main className="app-shell">
-      <section className={`workspace view-${activeView}`}>
-        <header className="topbar">
-          <button className="icon-button" onClick={() => setMenuOpen(true)} aria-label="Open app menu"><Menu size={21} /></button>
-          <div className="brand-lockup">
-            <h1>Pattern Coach</h1>
-          </div>
-          <button className={`avatar ${username ? "connected" : ""}`} onClick={() => setProfileOpen(true)} aria-label="Open profile">
-            {username ? username.slice(0, 2).toUpperCase() : <User size={17} />}
-          </button>
-        </header>
+    <main className="app-shell exact-app-host">
+      {progress && activeView === "dashboard" && <ImportStatus progress={progress} />}
 
-        {progress && activeView === "dashboard" && <ImportStatus progress={progress} />}
-
-        {error && <div className="error-banner">{error}</div>}
-
-        {report ? (
-          <>
-            {activeView === "dashboard" && (
-              <Dashboard
-                report={report}
-                topPhase={topPhase}
-                openGame={(gameId) => {
-                  setSelectedGameId(gameId);
+      {report ? (
+        <ExactPatternCoachMobile
+          activeView={activeView}
+          setActiveView={navigateView}
+          analysisReturnView={analysisReturnView}
+          report={report}
+          username={username}
+          openProfile={() => setProfileOpen(true)}
+          gamesPanel={
+            <GamesView
+              report={report}
+              selectedGameId={selectedGameId}
+              setSelectedGameId={setSelectedGameId}
+              openMove={(review) => {
+                const issue = report.issues.find(candidate => candidate.fenBefore === review.fenBefore && candidate.san === review.san);
+                if (issue) setSelectedIssue(issue);
+                const bucket = qualityBucket(review.quality);
+                setQualityFilter(bucket);
+                if (bucket === "good" || bucket === "best") {
                   setActiveView("games");
-                }}
-                openMistakes={() => setActiveView("mistakes")}
-                openQuality={(quality) => {
-                  setQualityFilter(quality);
-                  setDrillStartInPuzzle(false);
-                  setDrillLaunchKey(key => key + 1);
-                  setActiveView(quality === "good" || quality === "best" ? "games" : "drill");
-                }}
-                trainNow={() => {
-                  setQualityFilter("all");
-                  setSelectedPatternId("all");
-                  setDrillStartInPuzzle(false);
-                  setDrillLaunchKey(key => key + 1);
-                  setActiveView("drill");
-                }}
-                syncMeta={syncMeta}
-              />
-            )}
-            {activeView === "games" && (
-              <GamesView
-                report={report}
-                selectedGameId={selectedGameId}
-                setSelectedGameId={setSelectedGameId}
-                openMove={(review) => {
-                  const issue = report.issues.find(candidate => candidate.fenBefore === review.fenBefore && candidate.san === review.san);
-                  if (issue) setSelectedIssue(issue);
-                  const bucket = qualityBucket(review.quality);
-                  setQualityFilter(bucket);
-                  setActiveView(bucket === "good" || bucket === "best" ? "games" : "drill");
-                }}
-                openAnalysis={openAnalysis}
-              />
-            )}
-            {activeView === "mistakes" && (
-              <MistakeLab
-                report={report}
-                selectedIssue={selectedIssue}
-                setSelectedIssue={setSelectedIssue}
-                selectedPatternId={selectedPatternId}
-                setSelectedPatternId={setSelectedPatternId}
-                selectedReviewId={activeMistakeReviewId}
-                setSelectedReviewId={setActiveMistakeReviewId}
-                startDrill={(quality, patternId = "all", issue) => {
-                  setQualityFilter(quality);
-                  setSelectedPatternId(patternId);
-                  if (issue) setSelectedIssue(issue);
-                  setDrillStartInPuzzle(true);
-                  setDrillLaunchKey(key => key + 1);
-                  setActiveView("drill");
-                }}
-                openAnalysis={openAnalysis}
-              />
-            )}
-            {activeView === "analysis" && analysisStart && (
-              <AnalysisView
-                start={analysisStart}
-                back={() => setActiveView(analysisReturnView)}
-              />
-            )}
-            {activeView === "drill" && (
-              <DrillPanel
-                issues={report.issues}
-                summaries={report.summaries}
-                initialIssue={selectedIssue}
-                qualityFilter={qualityFilter}
-                patternId={selectedPatternId}
-                startInPuzzle={drillStartInPuzzle}
-                launchKey={drillLaunchKey}
-                onQualityFilterChange={setQualityFilter}
-                onPatternChange={setSelectedPatternId}
-                onAnalyze={(fen, flipped, title) => openAnalysis(fen, flipped, title)}
-                returnToSourceOnPuzzleBack={drillStartInPuzzle}
-                onBack={() => setActiveView("mistakes")}
-              />
-            )}
-          </>
-        ) : (
-          <FirstRunLogin
-            username={username}
-            setUsername={setUsername}
-            loading={loading}
-            openProfile={() => setProfileOpen(true)}
-            connectAndSync={runFirstRunConnect}
-            loadSample={() => { setPgnText(samplePgn); runPgnAnalysis(samplePgn, "Sample"); }}
-            error={error}
-          />
-        )}
+                } else {
+                  setActiveMistakeReviewId(review.id);
+                  setActiveView("mistakes");
+                }
+              }}
+              openAnalysis={openAnalysis}
+            />
+          }
+          labPanel={
+            <MistakeLab
+              report={report}
+              selectedIssue={selectedIssue}
+              setSelectedIssue={setSelectedIssue}
+              selectedPatternId={selectedPatternId}
+              setSelectedPatternId={setSelectedPatternId}
+              selectedReviewId={activeMistakeReviewId}
+              setSelectedReviewId={setActiveMistakeReviewId}
+              startDrill={(quality, patternId = "all", issue) => {
+                setQualityFilter(quality);
+                setSelectedPatternId(patternId);
+                if (issue) setSelectedIssue(issue);
+                setDrillStartInPuzzle(true);
+                setDrillLaunchKey(key => key + 1);
+                setActiveView("drill");
+              }}
+              openAnalysis={openAnalysis}
+            />
+          }
+          drillPanel={
+            <DrillPanel
+              issues={report.issues}
+              summaries={report.summaries}
+              initialIssue={selectedIssue}
+              qualityFilter={qualityFilter}
+              patternId={selectedPatternId}
+              startInPuzzle={drillStartInPuzzle}
+              launchKey={drillLaunchKey}
+              onQualityFilterChange={setQualityFilter}
+              onPatternChange={setSelectedPatternId}
+              onAnalyze={(fen, flipped, title) => openAnalysis(fen, flipped, title)}
+              returnToSourceOnPuzzleBack={drillStartInPuzzle}
+              onBack={() => setActiveView("mistakes")}
+            />
+          }
+          analysisPanel={analysisStart ? (
+            <AnalysisView
+              start={analysisStart}
+              back={() => setActiveView(analysisReturnView)}
+            />
+          ) : null}
+          startDrill={(quality = "all", patternId = "all", issue) => {
+            setQualityFilter(quality);
+            setSelectedPatternId(patternId);
+            if (issue) setSelectedIssue(issue);
+            setDrillStartInPuzzle(false);
+            setDrillLaunchKey(key => key + 1);
+            setActiveView("drill");
+          }}
+          openGame={(gameId) => {
+            setSelectedGameId(gameId);
+            setActiveView("games");
+          }}
+          openAnalysis={openAnalysis}
+        />
+      ) : (
+        <ExactMobileImport
+          username={username}
+          setUsername={setUsername}
+          loading={loading}
+          openProfile={() => setProfileOpen(true)}
+          connectAndSync={runFirstRunConnect}
+          loadSample={() => { setPgnText(samplePgn); runPgnAnalysis(samplePgn, "Sample"); }}
+          error={error}
+        />
+      )}
 
         {menuOpen && (
           <AppMenu
@@ -588,22 +583,6 @@ export default function App() {
             close={() => setProfileOpen(false)}
           />
         )}
-
-        <nav className={`bottom-nav view-${activeView}`}>
-          <button className={activeView === "dashboard" ? "active" : ""} onClick={() => setActiveView("dashboard")}><LayoutGrid size={20} /><span>Dashboard</span></button>
-          <button className={report && activeView === "games" ? "active" : ""} onClick={() => report ? setActiveView("games") : setProfileOpen(true)}><BookOpen size={20} /><span>Games</span></button>
-          <button className={report && activeView === "mistakes" ? "active" : ""} onClick={() => report ? setActiveView("mistakes") : setProfileOpen(true)}><Skull size={20} /><span>Mistake Lab</span></button>
-          <button className={report && activeView === "drill" ? "active" : ""} onClick={() => {
-            if (!report) {
-              setProfileOpen(true);
-              return;
-            }
-            setDrillStartInPuzzle(false);
-            setDrillLaunchKey(key => key + 1);
-            setActiveView("drill");
-          }}><Sword size={20} /><span>Drill Mode</span></button>
-        </nav>
-      </section>
     </main>
     </ErrorBoundary>
   );
@@ -1243,7 +1222,10 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
             if (previousIssue) setSelectedIssue(previousIssue);
             setSelectedReviewId(previousReview.id);
           } : undefined}
-          train={() => startDrill(qualityBucket(selectedReview.quality), selectedReviewIssue.id, selectedReviewIssue)}
+          train={() => {
+            setSelectedReviewId("");
+            startDrill(qualityBucket(selectedReview.quality), selectedReviewIssue.id, selectedReviewIssue);
+          }}
           openAnalysis={openAnalysis}
         />
       )}
@@ -1319,8 +1301,8 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
       ? review.engineEvalBefore
       : consequenceEval?.evalCp ?? review.engineEvalAfter;
   const boardEvalMate = comparison === "consequence" ? consequenceEval?.mate : undefined;
-  const boardFen = activeStep?.fen || review.fenBefore;
-  const boardLastMove = activeStep?.lastMove;
+  const boardFen = activeStep?.fen || (comparison === "consequence" ? review.fenAfter : review.fenBefore);
+  const boardLastMove = activeStep?.lastMove || (comparison === "consequence" ? { from: review.uci.slice(0, 2), to: review.uci.slice(2, 4) } : undefined);
   return (
     <div className="mistake-sheet-backdrop" role="dialog" aria-modal="true" aria-label="Mistake details">
       <div className="mistake-sheet" ref={sheetRef}>
