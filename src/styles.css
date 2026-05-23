@@ -2,6 +2,11 @@
 body { margin: 0; min-width: 320px; background: var(--bg); }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
+button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent, #7c7cf5);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
 
 .app-shell { height: 100dvh; overflow: hidden; }
 .workspace { width: min(1440px, 100%); height: 100dvh; overflow-y: auto; margin: 0 auto; padding: 32px 32px 104px; }
@@ -1458,7 +1463,16 @@ button { cursor: pointer; }
     display: block;
     position: relative;
     z-index: 2;
-    padding: 4px 16px 18px;
+    padding: 56px 16px 120px;
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .pc-mobile-surface::-webkit-scrollbar {
+    display: none;
   }
 
   .pc-status {
@@ -2996,7 +3010,7 @@ input, select, textarea {
   background: var(--bg); color: var(--text-primary); font-size: 0.9rem;
   transition: border-color 0.15s;
 }
-input:focus, select:focus, textarea:focus { border-color: var(--accent); outline: none; }
+input:focus-visible, select:focus-visible, textarea:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 2px; }
 input, select { height: 42px; padding: 0 12px; }
 
 textarea {
@@ -10840,24 +10854,32 @@ i.them { background: var(--pc-them); }
 }
 
 .pc-import-page {
-  display: grid;
-  grid-template-columns: 1.05fr 1fr;
+  width: min(393px, 100vw);
+  max-width: 393px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
   min-height: 100dvh;
+  overflow-y: auto;
 }
 
 .pc-import-left {
-  min-height: 0;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  gap: 36px;
-  padding: 64px 72px;
+  gap: 22px;
+  padding: 24px 24px 130px;
+}
+
+.pc-import-preview {
+  display: none;
 }
 
 .pc-import-copy h1 {
-  max-width: 500px;
+  max-width: 100%;
   margin: 0;
   color: var(--pc-text);
-  font-size: 2.75rem;
+  font-size: 1.82rem;
   font-weight: 400;
   letter-spacing: 0;
   line-height: 1.05;
@@ -11824,6 +11846,11 @@ i.them { background: var(--pc-them); }
   background: rgba(14,14,15,0.98);
   box-shadow: 0 -20px 60px rgba(0,0,0,0.45);
   animation: pcSheetUp 220ms cubic-bezier(0.2, 0.85, 0.2, 1);
+  transition: transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.pc-mobile-sheet.dragging {
+  transition: none;
 }
 
 .pc-mobile-sheet-handle,

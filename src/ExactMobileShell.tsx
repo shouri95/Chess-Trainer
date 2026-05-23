@@ -35,10 +35,6 @@ type ExactShellProps = {
   syncMeta?: SyncMeta;
   analysisStart?: ShellAnalysisStart | null;
   openProfile: () => void;
-  gamesPanel: ReactNode;
-  labPanel: ReactNode;
-  drillPanel: ReactNode;
-  analysisPanel: ReactNode;
   startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: AnalysisOpenContext) => void;
   openGame: (gameId: number) => void;
@@ -180,7 +176,12 @@ export function ExactPatternCoachMobile({
           report={report}
           start={analysisStart}
           setActiveView={setActiveView}
-          back={() => setActiveView(analysisReturnView)}
+          back={() => {
+            setMobileLabMode("list");
+            setMobileLabReviewId("");
+            setMobileDrillMode("picker");
+            setActiveView(analysisReturnView);
+          }}
         />
       )}
       <MobileTabBar activeView={activeView} analysisReturnView={analysisReturnView} setActiveView={setActiveView} openProfile={openProfile} />
@@ -362,58 +363,15 @@ function DashboardPage({ report, username, syncMeta, setActiveView, openProfile,
   train: () => void;
   openPattern: (patternId: string) => void;
 }) {
-  const trainable = useMemo(() => getTrainableReviews(report).slice(0, 3), [report]);
-  const topPattern = report.summaries[0];
-  const reviewedMoves = Math.max(1, report.moveReviews.length);
-  const cleanPct = Math.round(((report.moveQuality.good + report.moveQuality.excellent) / reviewedMoves) * 100);
-  const totalSpots = topPattern?.total || getTrainableReviews(report).length;
-  const latestGames = report.gameSummaries.slice().sort((a, b) => (b.endTime ?? b.id) - (a.endTime ?? a.id)).slice(0, 3);
-
   return (
-    <Frame nav="dashboard" setActiveView={setActiveView} openProfile={openProfile}>
-      <TopBar
-        eyebrow={todayLabel()}
-        title={<>Good morning, {cleanDisplayName(username || report.username)}.</>}
-        right={
-          <div className="pc-top-actions">
-            <div className="pc-sync-pill"><i />{report.games} games · {syncLabel(syncMeta)}</div>
-            <Button ghost onClick={openProfile}>↗ Import</Button>
-          </div>
-        }
-      />
-      <div className="pc-dashboard-grid">
-        <section className="pc-hero-card">
-          <div className="pc-hero-row">
-            <Pill tone="you">Main weakness</Pill>
-            <span className="pc-stable"><i /> STABLE · 3 WEEKS</span>
-          </div>
-          <ReplyOrbit title={topPattern?.title || "Opponent replies ignored"} total={totalSpots} />
-          <div className="pc-metrics">
-            <MetricBlock label="Spots" value={String(totalSpots)} hint="due now" />
-            <MetricBlock label="Review" value={String(Math.max(2, Math.ceil(getTrainableReviews(report).length / 18)))} unit="min" divider />
-            <MetricBlock label="Clean" value={String(cleanPct)} unit="%" divider trend={cleanPct < 50 ? "-6" : "+3"} />
-          </div>
-          <div className="pc-action-row">
-            <Button primary onClick={train}>Train this pattern <span>→</span></Button>
-            <Button onClick={() => setActiveView("mistakes")}>Review evidence</Button>
-          </div>
-        </section>
-        <aside className="pc-dashboard-side">
-          <ExamplesCard examples={trainable} review={() => setActiveView("mistakes")} />
-          <MobileStatsPanel report={report} />
-          <TodayCard />
-          <LatestGames games={latestGames} openGame={openGame} />
-        </aside>
-      </div>
-      <MobileDashboardSurface
-        report={report}
-        username={username}
-        openProfile={openProfile}
-        review={() => setActiveView("mistakes")}
-        train={train}
-        openPattern={openPattern}
-      />
-    </Frame>
+    <MobileDashboardSurface
+      report={report}
+      username={username}
+      openProfile={openProfile}
+      review={() => setActiveView("mistakes")}
+      train={train}
+      openPattern={openPattern}
+    />
   );
 }
 
@@ -424,84 +382,120 @@ function GamesPage({ report, syncMeta, setActiveView, openAnalysis }: {
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: AnalysisOpenContext) => void;
 }) {
   const [timeFilter, setTimeFilter] = useState("all");
+  const [mode, setMode] = useState<"list" | "detail">("list");
+  const [selectedGameId, setSelectedGameId] = useState(-1);
+  const [selectedPly, setSelectedPly] = useState(0);
+  const [boardFlipped, setBoardFlipped] = useState(false);
+
   const games = useMemo(() => report.gameSummaries
     .filter(game => timeFilter === "all" || game.timeClass === timeFilter)
     .slice()
     .sort((a, b) => (b.endTime ?? b.id) - (a.endTime ?? a.id)), [report.gameSummaries, timeFilter]);
-  const [selectedGameId, setSelectedGameId] = useState(games[0]?.id ?? -1);
-  const [selectedPly, setSelectedPly] = useState(0);
-  const selectedGame = games.find(game => game.id === selectedGameId) || games[0];
-  const reviews = useMemo(() => report.moveReviews.filter(review => review.gameId === selectedGame?.id), [report.moveReviews, selectedGame?.id]);
-  const timeline = useMemo(() => selectedGame ? buildGameTimeline(selectedGame, reviews) : [], [selectedGame, reviews]);
-  const selectedMove = selectedPly > 0 ? timeline[Math.min(selectedPly - 1, timeline.length - 1)] : null;
-  const currentFen = selectedMove?.fenAfter || timeline[0]?.fenBefore || new Chess().fen();
 
-  useEffect(() => {
-    if (selectedGame && selectedGame.id !== selectedGameId) setSelectedGameId(selectedGame.id);
-    if (!selectedGame && games[0]) setSelectedGameId(games[0].id);
-  }, [games, selectedGame, selectedGameId]);
+  const selectedGame = games.find(g => g.id === selectedGameId) || games[0];
+  const reviews = useMemo(() => report.moveReviews.filter(r => r.gameId === selectedGame?.id), [report.moveReviews, selectedGame?.id]);
+  const timeline = useMemo(() => selectedGame ? buildGameTimeline(selectedGame, reviews) : [], [selectedGame, reviews]);
+  const currentFen = selectedPly > 0 && timeline.length
+    ? timeline[Math.min(selectedPly - 1, timeline.length - 1)]?.fenAfter || timeline[0]?.fenBefore || new Chess().fen()
+    : timeline[0]?.fenBefore || new Chess().fen();
+  const selectedMove = selectedPly > 0 ? timeline[Math.min(selectedPly - 1, timeline.length - 1)] : null;
 
   useEffect(() => {
     setSelectedPly(0);
+    if (selectedGame) setBoardFlipped(selectedGame.color === "black");
   }, [selectedGameId]);
 
   const jumpBy = (delta: number) => setSelectedPly(current => Math.max(0, Math.min(timeline.length, current + delta)));
 
+  if (mode === "detail" && selectedGame) {
+    return (
+      <section className="pc-mobile-surface pc-mobile-games-detail">
+        <div className="pc-mobile-detail-top">
+          <MobileCircleButton ariaLabel="Back to games" onClick={() => { setMode("list"); setSelectedPly(0); }}>‹</MobileCircleButton>
+          <div className="pc-mobile-detail-title">
+            <strong>{selectedGame.opponent || "Unknown opponent"}</strong>
+            <span>{[selectedGame.opening, selectedGame.timeClass, formatGameDate(selectedGame.endTime)].filter(Boolean).join(" · ")}</span>
+          </div>
+          <MobileCircleButton
+            ariaLabel="Analyse position"
+            onClick={() => openAnalysis(currentFen, selectedGame.color === "black", selectedGame.opponent || "Game analysis", { gamePgn: selectedGame.pgn })}
+          >↗</MobileCircleButton>
+        </div>
+
+        <div className="pc-mobile-analysis-board-row">
+          <EvalBar score={0} height={325} />
+          <DesignBoard
+            fen={currentFen}
+            size={313}
+            flipped={boardFlipped}
+            lastMove={selectedMove?.lastMove}
+            highlights={selectedMove ? { [selectedMove.lastMove.to]: selectedMove.review ? qualityTone(selectedMove.review.quality) : "sel" } : {}}
+            onAnalyze={() => openAnalysis(currentFen, boardFlipped, selectedGame.opponent || "Game analysis", { gamePgn: selectedGame.pgn })}
+          />
+        </div>
+
+        <div className="pc-mobile-analysis-eval">
+          <div>
+            <span>Replay</span>
+            <strong> {selectedPly}/{timeline.length}</strong>
+          </div>
+          <div className="pc-mobile-engine-status">
+            <span>{sideToMove(currentFen).toUpperCase()}</span>
+            <small>to move</small>
+          </div>
+        </div>
+
+        <div className="pc-mobile-analysis-controls-row">
+          <button className="pc-mobile-analysis-flip" onClick={() => setBoardFlipped(v => !v)}>⇄</button>
+          <div className="pc-mobile-analysis-controls">
+            <button onClick={() => setSelectedPly(0)}>⏮</button>
+            <button onClick={() => jumpBy(-1)} disabled={selectedPly <= 0}>◀</button>
+            <button onClick={() => setSelectedPly(timeline.length)}>⏭</button>
+            <button onClick={() => jumpBy(1)} disabled={selectedPly >= timeline.length}>▶</button>
+          </div>
+        </div>
+
+        <div className="game-move-strip" aria-label="Game move list">
+          <button className={selectedPly === 0 ? "active start" : "start"} onClick={() => setSelectedPly(0)}>Start</button>
+          {timeline.map(move => (
+            <button
+              key={`${move.ply}-${move.uci}`}
+              className={`${selectedPly === move.ply ? "active" : ""} ${move.review ? qualityBucket(move.review.quality) : ""} ${move.color === (selectedGame.color === "white" ? "w" : "b") ? "user-move" : ""}`.trim()}
+              onClick={() => setSelectedPly(move.ply)}
+            >
+              {move.san}
+            </button>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
   return (
-    <Frame nav="games" setActiveView={setActiveView}>
-      <TopBar
-        eyebrow={`${report.games} games · ${syncLabel(syncMeta)}`}
-        title="Games"
-        right={
-          <div className="pc-filter-row">
-            {(["all", "rapid", "blitz", "bullet", "daily"] as const).map(value => (
-              <button key={value} className={timeFilter === value ? "active" : ""} onClick={() => setTimeFilter(value)}>{value === "all" ? "All time controls" : titleCase(value)}</button>
-            ))}
-          </div>
-        }
-      />
-      <div className="pc-games-layout">
-        <aside className="pc-game-list">
-          <div className="pc-list-head"><span /> <span>Opponent / Opening</span><span>Plies</span><span>!</span></div>
-          <div className="pc-list-scroll">
-            {games.map(game => (
-              <GameRow key={game.id} game={game} selected={game.id === selectedGame?.id} onClick={() => setSelectedGameId(game.id)} />
-            ))}
-          </div>
-        </aside>
-        <section className="pc-replay-panel">
-          <div className="pc-replay-board">
-            <DesignBoard
-              fen={currentFen}
-              size={380}
-              flipped={selectedGame?.color === "black"}
-              lastMove={selectedMove?.lastMove}
-              highlights={selectedMove ? { [selectedMove.lastMove.to]: selectedMove.review ? qualityTone(selectedMove.review.quality) : "sel" } : {}}
-              onAnalyze={() => openAnalysis(currentFen, selectedGame?.color === "black", selectedGame?.opponent || "Game analysis", { gamePgn: selectedGame?.pgn })}
-            />
-            <ReplayControls selectedPly={selectedPly} total={timeline.length} setSelectedPly={setSelectedPly} jumpBy={jumpBy} />
-            <div className="pc-replay-caption">MOVE {selectedPly} / {timeline.length || 0} · {sideToMove(currentFen).toUpperCase()} TO MOVE</div>
-          </div>
-          <div className="pc-move-panel">
-            <div className="pc-game-title-row">
-              <div>
-                <strong>{playerVsOpponent(selectedGame)}</strong>
-                <span>{[selectedGame?.opening, selectedGame?.timeClass, formatGameDate(selectedGame?.endTime)].filter(Boolean).join(" · ")}</span>
-              </div>
-              <div>
-                <Button small onClick={() => setActiveView("mistakes")}>⤳ Mistake Lab</Button>
-                <Button small onClick={() => openAnalysis(currentFen, selectedGame?.color === "black", selectedGame?.opponent || "Game analysis", { gamePgn: selectedGame?.pgn })}>⤴ Analysis</Button>
-              </div>
-            </div>
-            <MoveLog timeline={timeline} selectedPly={selectedPly} setSelectedPly={setSelectedPly} />
-          </div>
-        </section>
+    <section className="pc-mobile-surface pc-mobile-games">
+      <MobilePageHead eyebrow={`${games.length} of ${report.games} games`} title="Games" />
+      <div className="pc-mobile-chip-row">
+        {(Object.entries({ all: "All", mistakes: "With mistakes", white: "White", black: "Black" }) as [string, string][]).map(([id, label]) => (
+          <button key={id} className={timeFilter === id ? "active" : ""} onClick={() => setTimeFilter(id)}>{label}</button>
+        ))}
       </div>
-      <MobileGamesSurface
-        games={games}
-        setSelectedGameId={setSelectedGameId}
-      />
-    </Frame>
+      <div className="pc-mobile-row-list">
+        {games.filter(g => {
+          if (timeFilter === "mistakes") return g.issues > 0;
+          if (timeFilter === "white") return g.color === "white";
+          if (timeFilter === "black") return g.color === "black";
+          return true;
+        }).map(game => (
+          <button key={game.id} className="pc-mobile-game-row" onClick={() => { setSelectedGameId(game.id); setMode("detail"); }}>
+            <span className={game.result}>{game.result === "win" ? "W" : game.result === "loss" ? "L" : game.result === "draw" ? "D" : "?"}</span>
+            <div><strong>{game.opponent || "Unknown opponent"}</strong><small>{[game.opening, game.timeClass, formatGameDate(game.endTime)].filter(Boolean).join(" · ")}</small></div>
+            <b>{game.issues || "—"}</b>
+            <em>›</em>
+          </button>
+        ))}
+        {games.length === 0 && <div className="pc-mobile-empty-inline">No games match this filter.</div>}
+      </div>
+    </section>
   );
 }
 
@@ -552,126 +546,29 @@ function MistakeLabPage({
     }
   }, [filteredReviews, selectedReviewId]);
 
-  const moveSquares = selectedReview?.uci && /^[a-h][1-8][a-h][1-8]/.test(selectedReview.uci)
-    ? { from: selectedReview.uci.slice(0, 2), to: selectedReview.uci.slice(2, 4) }
-    : null;
-  const bestMove = selectedReview?.engineBestMove || selectedReview?.engineLines?.[0]?.bestMove || "";
-  const bestSquares = /^[a-h][1-8][a-h][1-8]/.test(bestMove) ? { from: bestMove.slice(0, 2), to: bestMove.slice(2, 4) } : null;
-  const boardHighlights = detailView === "your" && moveSquares
-    ? { [moveSquares.from]: "you", [moveSquares.to]: "you" }
-    : detailView === "idea" && bestSquares
-      ? { [bestSquares.from]: "idea", [bestSquares.to]: "idea" }
-      : moveSquares
-        ? { [moveSquares.to]: "them" }
-        : {};
-  const boardArrows: DesignArrow[] = detailView === "your" && moveSquares
-    ? [{ ...moveSquares, kind: "you" }]
-    : detailView === "idea" && bestSquares
-      ? [{ ...bestSquares, kind: "idea" }]
-      : moveSquares
-        ? [{ ...moveSquares, kind: "them" }]
-        : [];
-
   return (
-    <Frame nav="lab" setActiveView={setActiveView}>
-      <TopBar
-        eyebrow={`${filteredReviews.length} spots · ${report.summaries.length} patterns`}
-        title="Mistake Lab"
-        right={
-          <div className="pc-filter-row">
-            <select value={patternFilter} onChange={event => setPatternFilter(event.target.value)} aria-label="Pattern filter">
-              <option value="all">All patterns</option>
-              {report.summaries.map(summary => <option key={summary.id} value={summary.id}>{summary.title}</option>)}
-            </select>
-            <select value={qualityFilter} onChange={event => setQualityFilter(event.target.value as MoveReviewQuality | "all")} aria-label="Move quality filter">
-              {qualityOptions.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
-            </select>
-          </div>
-        }
-      />
-      <div className="pc-lab-layout">
-        <aside className="pc-mistake-list">
-          <PatternHeader summaries={report.summaries} activeId={patternFilter} />
-          <div className="pc-list-scroll">
-            {filteredReviews.map(review => (
-              <MistakeRow
-                key={review.id}
-                review={review}
-                issue={issueForReview(report, review)}
-                selected={review.id === selectedReview?.id}
-                onClick={() => setSelectedReviewId(review.id)}
-              />
-            ))}
-          </div>
-        </aside>
-        {selectedReview && issue && (
-          <section className="pc-mistake-detail">
-            <div className="pc-detail-board">
-              <DesignBoard
-                fen={detailView === "idea" ? selectedReview.fenBefore : selectedReview.fenAfter}
-                size={420}
-                flipped={selectedReview.color === "black"}
-                highlights={boardHighlights}
-                arrows={boardArrows}
-                lastMove={detailView === "them" && moveSquares ? moveSquares : undefined}
-                onAnalyze={() => openAnalysis(selectedReview.fenAfter, selectedReview.color === "black", `${selectedReview.moveNumber}. ${selectedReview.san}`, { gamePgn: game?.pgn, returnMistakeReviewId: selectedReview.id })}
-              />
-              <Segmented
-                value={detailView}
-                options={[
-                  { id: "your", label: "Your move", tone: "you" },
-                  { id: "them", label: "Their reply", tone: "them" },
-                  { id: "idea", label: "Idea", tone: "idea" },
-                ]}
-                onChange={setDetailView}
-              />
-            </div>
-            <div className="pc-detail-copy">
-              <div className="pc-detail-badges">
-                <Pill tone="them">{qualityLabel(selectedReview.quality)}</Pill>
-                <Pill tone="you" subtle>{issue.title}</Pill>
-                <span>{selectedReview.moveNumber}. {selectedReview.san} · vs {selectedReview.opponent || "Opponent"}</span>
-              </div>
-              <h2>You moved <code>{selectedReview.san}</code> without fully seeing the reply.</h2>
-              <MoveMap
-                you={selectedReview.san}
-                them={undefined}
-                idea={formatMoveSan(selectedReview.fenBefore, bestMove) || "Find it"}
-                insight={visualConsequenceCopy(selectedReview, issue)}
-              />
-              <div className="pc-action-row">
-                <Button primary onClick={() => startDrill(qualityBucket(selectedReview.quality), issue.id, issue)}>▶ Train this position</Button>
-                <Button onClick={() => openAnalysis(selectedReview.fenAfter, selectedReview.color === "black", `${selectedReview.moveNumber}. ${selectedReview.san}`, { gamePgn: game?.pgn, returnMistakeReviewId: selectedReview.id })}>Open in Analysis</Button>
-                <Button ghost onClick={() => setSelectedReviewId(filteredReviews[(filteredReviews.indexOf(selectedReview) + 1) % filteredReviews.length]?.id || "")}>Skip</Button>
-              </div>
-              <EngineDrawer review={selectedReview} />
-            </div>
-          </section>
-        )}
-      </div>
-      <MobileMistakeLabSurface
-        report={report}
-        reviews={filteredReviews}
-        selectedReview={selectedReview}
-        selectedIssue={issue}
-        patternFilter={patternFilter}
-        setPatternFilter={setPatternFilter}
-        qualityFilter={qualityFilter}
-        setQualityFilter={setQualityFilter}
-        qualityOptions={qualityOptions}
-        mode={mobileMode}
-        setMode={setMobileMode}
-        selectReview={(reviewId) => {
-          setSelectedReviewId(reviewId);
-          setMobileMode("detail");
-        }}
-        detailView={detailView}
-        setDetailView={setDetailView}
-        startDrill={startDrill}
-        openAnalysis={openAnalysis}
-        game={game}
-      />
-    </Frame>
+    <MobileMistakeLabSurface
+      report={report}
+      reviews={filteredReviews}
+      selectedReview={selectedReview}
+      selectedIssue={issue}
+      patternFilter={patternFilter}
+      setPatternFilter={setPatternFilter}
+      qualityFilter={qualityFilter}
+      setQualityFilter={setQualityFilter}
+      qualityOptions={qualityOptions}
+      mode={mobileMode}
+      setMode={setMobileMode}
+      selectReview={(reviewId) => {
+        setSelectedReviewId(reviewId);
+        setMobileMode("detail");
+      }}
+      detailView={detailView}
+      setDetailView={setDetailView}
+      startDrill={startDrill}
+      openAnalysis={openAnalysis}
+      game={game}
+    />
   );
 }
 
@@ -686,110 +583,30 @@ function DrillPage({ report, setActiveView, startDrill, openAnalysis, mobileMode
   const issues = useMemo(() => report.issues.slice().sort((a, b) => b.severity - a.severity), [report.issues]);
   const [index, setIndex] = useState(0);
   const [candidate, setCandidate] = useState("");
-  const [showMap, setShowMap] = useState(false);
   const issue = issues[index] || issues[0];
   const bestMove = issue?.engineBestMove || "";
-  const candidates = Array.from(new Set([
-    bestMove && formatMoveSan(issue?.fenBefore || "", bestMove),
-    issue?.san,
-    "Nc3",
-    "h3",
-    "d4",
-  ].filter(Boolean))) as string[];
 
   if (!issue) {
     return (
-      <Frame nav="drill" setActiveView={setActiveView}>
-        <TopBar eyebrow="Drill" title="No drill positions" />
-        <div className="pc-empty-state">Sync or import more games to create a personal drill queue.</div>
-      </Frame>
+      <div className="pc-empty-state">Sync or import more games to create a personal drill queue.</div>
     );
   }
 
-  const moveSquares = /^[a-h][1-8][a-h][1-8]/.test(issue.uci) ? { from: issue.uci.slice(0, 2), to: issue.uci.slice(2, 4) } : null;
-  const analysisContextForIssue = (target: MoveIssue): AnalysisOpenContext => {
-    const review = reviewForIssue(report, target);
-    const game = review ? report.gameSummaries.find(item => item.id === review.gameId) : undefined;
-    return { gamePgn: game?.pgn, returnMistakeReviewId: review?.id };
-  };
-
   return (
-    <Frame nav="drill" setActiveView={setActiveView}>
-      <TopBar
-        eyebrow={`${issue.title} · spot ${index + 1} of ${issues.length}`}
-        title="Drill"
-        right={
-          <div className="pc-top-actions">
-            <label className="pc-toggle"><span>Move map</span><input type="checkbox" checked={showMap} onChange={event => setShowMap(event.target.checked)} /></label>
-            <Button ghost small onClick={() => startDrill("all")}>⚙ Filters</Button>
-          </div>
-        }
-      />
-      <section className="pc-drill-stage">
-        <div className="pc-progress-strip">
-          <span>{String(index + 1).padStart(2, "0")} / {issues.length}</span>
-          <div>{issues.slice(0, Math.max(14, issues.length)).map((item, i) => <i key={`${item.fenBefore}-${i}`} className={i < index ? "done" : i === index ? "current" : ""} />)}</div>
-          <span>00:42</span>
-        </div>
-        <div className="pc-drill-prompt">
-          <span>{titleCase(issue.color)} to move</span>
-          <h2>Predict their <i>most forcing</i> reply.</h2>
-        </div>
-        <div className="pc-drill-board-row">
-          <SideMeta issue={issue} />
-          <DesignBoard
-            fen={issue.fenBefore}
-            size={500}
-            flipped={issue.color === "black"}
-            lastMove={moveSquares || undefined}
-            highlights={candidate === issue.san && moveSquares ? { [moveSquares.to]: "you" } : {}}
-            onAnalyze={() => openAnalysis(issue.fenBefore, issue.color === "black", issue.title, analysisContextForIssue(issue))}
-          />
-          <div className="pc-candidates">
-            <div className="pc-panel-label">Your candidates</div>
-            {candidates.map((move, i) => (
-              <button key={`${move}-${i}`} className={candidate === move ? "active" : ""} onClick={() => setCandidate(move)}>
-                <span>{move}</span><small>{i === 0 ? "develops" : i === 1 ? "played move" : "candidate"}</small>
-              </button>
-            ))}
-            <button className="pc-dashed" onClick={() => openAnalysis(issue.fenBefore, issue.color === "black", issue.title, analysisContextForIssue(issue))}>or play on the board</button>
-          </div>
-        </div>
-        {showMap && (
-          <MoveMap
-            compact
-            you={candidate || "candidate"}
-            them="reply"
-            idea={formatMoveSan(issue.fenBefore, bestMove) || "idea"}
-            insight={issue.advice || "Before you move, predict their most forcing reply."}
-          />
-        )}
-        <div className="pc-drill-controls">
-          <Button small onClick={() => setIndex(current => (current - 1 + issues.length) % issues.length)}>← Prev</Button>
-          <Button small onClick={() => setCandidate("")}>↺ Reset</Button>
-          <Button small onClick={() => setCandidate(formatMoveSan(issue.fenBefore, bestMove) || issue.san)}>✨ Hint</Button>
-          <Button small onClick={() => setIndex(current => (current + 1) % issues.length)}>Skip</Button>
-          <Button primary onClick={() => {
-            setCandidate(formatMoveSan(issue.fenBefore, bestMove) || issue.san);
-            setTimeout(() => setIndex(current => (current + 1) % issues.length), 350);
-          }}>Commit move</Button>
-        </div>
-      </section>
-      <MobileDrillSurface
-        report={report}
-        issues={issues}
-        issue={issue}
-        index={index}
-        setIndex={setIndex}
-        candidate={candidate}
-        setCandidate={setCandidate}
-        bestMove={bestMove}
-        candidates={candidates}
-        mode={mobileMode}
-        setMode={setMobileMode}
-        openAnalysis={openAnalysis}
-      />
-    </Frame>
+    <MobileDrillSurface
+      report={report}
+      issues={issues}
+      issue={issue}
+      index={index}
+      setIndex={setIndex}
+      candidate={candidate}
+      setCandidate={setCandidate}
+      bestMove={bestMove}
+      candidates={buildDrillCandidates(issue, bestMove)}
+      mode={mobileMode}
+      setMode={setMobileMode}
+      openAnalysis={openAnalysis}
+    />
   );
 }
 
@@ -817,8 +634,7 @@ function AnalysisPage({ report, start, setActiveView, back }: {
   }, [history, start]);
 
   const entry = history[index] || history[0] || { fen: start?.fen || new Chess().fen() };
-  const evalScore = 0.4;
-  const visibleMoves = history.slice(Math.max(1, index - 2), Math.min(history.length, index + 4));
+
   const explainEntry = useCallback(async (target?: AnalysisHistoryEntry) => {
     const move = target || entry;
     const review = reviewForAnalysisEntry(report, move, start?.returnMistakeReviewId);
@@ -851,72 +667,12 @@ function AnalysisPage({ report, start, setActiveView, back }: {
     }
   }, [analyzeMovePair, entry, report, start]);
 
+  if (!start) {
+    return <div className="pc-analysis-empty">Open Analysis from a game or mistake to inspect the exact position.</div>;
+  }
+
   return (
-    <Frame nav="analysis" setActiveView={setActiveView}>
-      <TopBar
-        eyebrow={start?.title ? `From: ${start.title}` : "Explore position"}
-        title="Analysis"
-        right={
-          <div className="pc-top-actions">
-            <div className="pc-fen-pill"><span>FEN</span><b>{entry.fen}</b></div>
-            <Button small onClick={() => setIndex(0)}>↺ Reset</Button>
-            <Button small onClick={() => setFlipped(value => !value)}>⇅ Flip</Button>
-            <Button ghost small onClick={back}>Back</Button>
-          </div>
-        }
-      />
-      <div className="pc-analysis-layout">
-        <section className="pc-analysis-board-col">
-          <EvalBar score={evalScore} height={500} />
-          <div className="pc-analysis-board-stack">
-            <DesignBoard
-              fen={entry.fen}
-              size={500}
-              flipped={flipped}
-              lastMove={entry.lastMove}
-              highlights={entry.lastMove ? { [entry.lastMove.to]: "sel" } : {}}
-              showAnalyze={false}
-            />
-            <div className="pc-board-toolbar">
-              <Button small onClick={() => setIndex(0)}>⏮</Button>
-              <Button small disabled={index <= 0} onClick={() => setIndex(current => Math.max(0, current - 1))}>◀</Button>
-              <Button small disabled={index >= history.length - 1} onClick={() => setIndex(current => Math.min(history.length - 1, current + 1))}>▶</Button>
-              <Button small onClick={() => setIndex(history.length - 1)}>⏭</Button>
-              <span />
-              <label className="pc-toggle"><span>Learn mode</span><input type="checkbox" /></label>
-              <label className="pc-toggle"><span>Arrows</span><input type="checkbox" defaultChecked /></label>
-            </div>
-          </div>
-        </section>
-        <aside className="pc-analysis-side">
-          <div className="pc-eval-summary">
-            <div className="pc-panel-label">Evaluation</div>
-            <strong>+0.4</strong><span>depth 24</span>
-            <p>White is slightly better. Equal play.</p>
-          </div>
-          <div className="pc-move-tree">
-            <header><span>Variations</span><b>MultiPV 3</b></header>
-            {(visibleMoves.length ? visibleMoves : history.slice(0, 5)).map((move, i) => (
-              <div className={`pc-analysis-row ${history.indexOf(move) === index ? "active" : ""}`} key={`${move.fen}-${i}`}>
-                <button onClick={() => setIndex(history.indexOf(move))}>
-                  <span>{move.moveNumber || i + 1}.</span>
-                  <i>{move.side === "b" ? "●" : "○"}</i>
-                  <strong>{move.san || "Start"}</strong>
-                  {i === 0 ? <Pill tone="idea" subtle>Best</Pill> : <small>+0.{i + 2}</small>}
-                </button>
-                <button className="pc-why-inline" onClick={() => explainEntry(move)}>WHY</button>
-              </div>
-            ))}
-          </div>
-          <div className="pc-engine-drawer">
-            <header><span>▾ Engine lines</span><b>SF 18 · 24</b></header>
-            {["O-O d6 h3 a6 a4 Ba7 Nc3", "c3 d6 h3 a6 Bb3 Ba7 Re1", "d3 h6 c3 d6 h3 a6 a4"].map((line, i) => (
-              <p key={line}><b>+0.{4 - i}</b><span>{line}</span></p>
-            ))}
-          </div>
-        </aside>
-      </div>
-      {!start && <div className="pc-analysis-empty">Open Analysis from a game or mistake to inspect the exact position.</div>}
+    <>
       <MobileAnalysisSurface
         history={history}
         index={index}
@@ -930,7 +686,7 @@ function AnalysisPage({ report, start, setActiveView, back }: {
         onExplainMove={explainEntry}
       />
       <MoveExplainerSheet state={explainer} close={() => setExplainer(current => ({ ...current, open: false }))} />
-    </Frame>
+    </>
   );
 }
 
@@ -963,7 +719,7 @@ function MobileDashboardSurface({ report, username, openProfile, review, train, 
         </svg>
         <div className="pc-mobile-focus-top">
           <Pill tone="you">Today's focus</Pill>
-          <span><i />4 MIN · {focus?.count || 0} SPOTS</span>
+          <span><i />{focus ? `${Math.max(1, Math.ceil((focus.count || 1) * 0.7))} MIN` : ""} · {focus?.count || 0} SPOTS</span>
         </div>
         <h2>{focus ? patternHeadline(focus.title) : <>Sync games to reveal your first <i>pattern</i>.</>}</h2>
         <p>{focus ? `${focus.title} · ${focus.count} live examples` : "No trainable mistakes in the current report"}</p>
@@ -1138,7 +894,23 @@ function MobileMistakeLabSurface({
 }) {
   const patterns = buildMobilePatterns(report);
   const detailIssue = selectedReview ? selectedIssue || issueForReview(report, selectedReview) : null;
-  const visibleReviews = orderReviewsForVisualList(reviews).slice(0, 8);
+
+  if (mode === "detail" && selectedReview && detailIssue) {
+    return (
+      <MobileMistakeDetailSurface
+        review={selectedReview}
+        issue={detailIssue}
+        detailView={detailView}
+        setDetailView={setDetailView}
+        back={() => setMode("list")}
+        startDrill={startDrill}
+        openAnalysis={openAnalysis}
+        game={game}
+      />
+    );
+  }
+
+  const visibleReviews = orderReviewsForVisualList(reviews);
 
   return (
     <section className="pc-mobile-surface pc-mobile-lab">
@@ -1187,21 +959,6 @@ function MobileMistakeLabSurface({
         ))}
         {!reviews.length && <div className="pc-mobile-empty-inline">No trainable mistakes match this filter.</div>}
       </div>
-      {mode === "detail" && selectedReview && detailIssue && (
-        <MobileMistakeBottomSheet close={() => setMode("list")}>
-          <MobileMistakeDetailSurface
-            review={selectedReview}
-            issue={detailIssue}
-            detailView={detailView}
-            setDetailView={setDetailView}
-            back={() => setMode("list")}
-            startDrill={startDrill}
-            openAnalysis={openAnalysis}
-            game={game}
-            sheet
-          />
-        </MobileMistakeBottomSheet>
-      )}
     </section>
   );
 }
@@ -1252,7 +1009,7 @@ function MobileMistakeBottomSheet({ children, close }: { children: ReactNode; cl
   );
 }
 
-function MobileMistakeDetailSurface({ review, issue, detailView, setDetailView, back, startDrill, openAnalysis, game, sheet = false }: {
+function MobileMistakeDetailSurface({ review, issue, detailView, setDetailView, back, startDrill, openAnalysis, game }: {
   review: MoveReview;
   issue: MoveIssue;
   detailView: "your" | "them" | "idea";
@@ -1261,7 +1018,6 @@ function MobileMistakeDetailSurface({ review, issue, detailView, setDetailView, 
   startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: AnalysisOpenContext) => void;
   game?: GameSummary;
-  sheet?: boolean;
 }) {
   const moveSquares = review.uci && /^[a-h][1-8][a-h][1-8]/.test(review.uci) ? { from: review.uci.slice(0, 2), to: review.uci.slice(2, 4) } : null;
   const reply = game ? nextMoveAfterReview(game, review) : null;
@@ -1288,7 +1044,7 @@ function MobileMistakeDetailSurface({ review, issue, detailView, setDetailView, 
       : [];
 
   return (
-    <section className={`pc-mobile-surface pc-mobile-lab-detail ${sheet ? "in-sheet" : ""}`}>
+    <section className="pc-mobile-surface pc-mobile-lab-detail">
       <div className="pc-mobile-detail-top">
         <MobileCircleButton ariaLabel="Back" onClick={back}>‹</MobileCircleButton>
         <div className="pc-mobile-detail-title">
@@ -1405,7 +1161,7 @@ function MobileDrillSurface({ report, issues, issue, index, setIndex, candidate,
         <div>
           <Pill tone="idea">Mixed set</Pill>
           <h2>All <i>patterns</i></h2>
-          <p>{Math.max(total, issues.length)} spots · spaced repetition · 12 min</p>
+          <p>{Math.max(total, issues.length)} spots · {Math.max(1, Math.ceil(Math.max(total, issues.length) / 5))} min</p>
           <span>{issues.length ? "Drill everything" : "No drill queue yet"}</span>
         </div>
         <MobileDotMatrix />
@@ -2098,13 +1854,33 @@ function buildDrillPatternCatalog(report: AnalysisReport, issues: MoveIssue[]) {
 
 function buildDrillCandidates(issue: MoveIssue | undefined, bestMove: string) {
   if (!issue) return [];
-  return Array.from(new Set([
-    bestMove && formatMoveSan(issue.fenBefore || "", bestMove),
-    issue.san,
-    "Nc3",
-    "h3",
-    "d4",
-  ].filter(Boolean))) as string[];
+  const fen = issue.fenBefore;
+  if (!fen) return [issue.san].filter(Boolean);
+
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  const add = (move: string) => {
+    if (!move || seen.has(move)) return;
+    seen.add(move);
+    result.push(move);
+  };
+
+  add(formatMoveSan(fen, bestMove) || bestMove);
+  add(issue.san);
+
+  try {
+    const board = new Chess(fen);
+    const legalSanMoves = board.moves({ verbose: true }).map(m => m.san);
+    for (const m of legalSanMoves) {
+      if (result.length >= 6) break;
+      add(m);
+    }
+  } catch {
+    // fall back to displayed moves only
+  }
+
+  return result;
 }
 
 function buildQualityFilterOptions(reviews: MoveReview[]): Array<{ id: MoveReviewQuality | "all"; label: string; count: number }> {
@@ -2533,24 +2309,26 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-function Frame({ children, nav, setActiveView, openProfile }: {
+function Frame({ children, nav, setActiveView, openProfile, report }: {
   children: ReactNode;
   nav: "dashboard" | "games" | "lab" | "drill" | "analysis";
   setActiveView: (view: AppView) => void | undefined;
   openProfile?: () => void;
+  report?: AnalysisReport;
 }) {
   return (
     <div className="pc-frame">
-      <NavRail active={nav} setActiveView={setActiveView} openProfile={openProfile} />
+      <NavRail active={nav} setActiveView={setActiveView} openProfile={openProfile} report={report} />
       <main className="pc-main">{children}</main>
     </div>
   );
 }
 
-function NavRail({ active, setActiveView, openProfile }: {
+function NavRail({ active, setActiveView, openProfile, report }: {
   active: "dashboard" | "games" | "lab" | "drill" | "analysis";
   setActiveView: (view: AppView) => void | undefined;
   openProfile?: () => void;
+  report?: AnalysisReport;
 }) {
   const items = [
     { id: "dashboard", label: "Dashboard", icon: "◎", view: "dashboard" },
@@ -2559,6 +2337,12 @@ function NavRail({ active, setActiveView, openProfile }: {
     { id: "drill", label: "Drill", icon: "△", view: "drill" },
     { id: "analysis", label: "Analysis", icon: "◯", view: "analysis" },
   ] as const;
+
+  const totalGames = report?.games ?? 0;
+  const initials = (report?.username || "PC").slice(0, 2).toUpperCase();
+  const rating = report?.skillProfile?.estimatedRating ?? 1200;
+  const peakRating = report?.peakRating ?? rating;
+
   return (
     <aside className="pc-nav">
       <BrandMark compact />
@@ -2571,11 +2355,16 @@ function NavRail({ active, setActiveView, openProfile }: {
       </nav>
       <div className="pc-nav-bottom">
         <div className="pc-streak-card">
-          <span>Streak</span><strong>12</strong><small>days</small>
-          <div>{Array.from({ length: 14 }).map((_, i) => <i key={i} className={i < 12 ? "on" : ""} />)}</div>
+          <span>Games</span><strong>{totalGames}</strong><small>imported</small>
+          <div className="pc-streak-bars-small">
+            {Array.from({ length: 14 }).map((_, i) => {
+              const threshold = Math.max(1, Math.floor(totalGames / 14));
+              return <i key={i} className={i < Math.min(14, Math.floor(totalGames / threshold)) ? "on" : ""} />;
+            })}
+          </div>
         </div>
         <button className="pc-profile-mini" onClick={openProfile}>
-          <b>OM</b><span>1640 · rapid</span>
+          <b>{initials}</b><span>{rating} · {peakRating > rating ? `peak ${peakRating}` : "rating"}</span>
         </button>
       </div>
     </aside>
@@ -2691,6 +2480,7 @@ function ExamplesCard({ examples, review }: { examples: MoveReview[]; review: ()
 function MobileStatsPanel({ report }: { report: AnalysisReport }) {
   const stats = buildMobileQualityStats(report).map(stat => ({ ...stat, label: stat.short }));
   const total = Math.max(1, stats.reduce((sum, stat) => sum + stat.count, 0));
+  const weekly = buildWeeklyTrend(report);
   return (
     <section className="pc-mobile-stats">
       <SectionHead eyebrow="Move quality" meta="Last 30 days" />
@@ -2706,7 +2496,7 @@ function MobileStatsPanel({ report }: { report: AnalysisReport }) {
       <div className="pc-severity-bar">
         {stats.map(stat => <i key={stat.key} className={stat.key} style={{ width: `${Math.max(4, (stat.count / total) * 100)}%` }} />)}
       </div>
-      <div className="pc-severity-meta"><span>{total} flagged moves</span><b>↓ 7% vs prev 30d</b></div>
+      <div className="pc-severity-meta"><span>{total} flagged moves</span><b>{weekly.changePct < 0 ? "▼" : "▲"} {Math.abs(weekly.changePct)}% {weekly.compareLabel}</b></div>
     </section>
   );
 }
@@ -2723,19 +2513,24 @@ function Sparkline({ colorKey, data = [] }: { colorKey: string; data?: number[] 
   );
 }
 
-function TodayCard() {
+function TodayCard({ report }: { report: AnalysisReport }) {
+  const weekly = buildWeeklyTrend(report);
+  const maxBar = Math.max(1, ...weekly.days.map(d => d.b + d.m + d.i));
   return (
     <section className="pc-card pc-today-card">
-      <div className="pc-panel-label">This week</div>
+      <div className="pc-panel-label">{weekly.label}</div>
       <div className="pc-week-bars">
-        {[18, 24, 12, 32, 28, 40, 16].map((v, i) => (
-          <div key={i}><i style={{ height: v }} className={i === 6 ? "today" : ""} /><span>{["M", "T", "W", "T", "F", "S", "S"][i]}</span></div>
+        {weekly.days.map((d, i) => (
+          <div key={i}>
+            <i style={{ height: maxBar ? ((d.b + d.m + d.i) / maxBar) * 44 : 4 }} className={i === weekly.days.length - 1 ? "today" : ""} />
+            <span>{d.day}</span>
+          </div>
         ))}
       </div>
       <div className="pc-week-stats">
-        <MetricBlock label="Resolved" value="22 / 36" />
-        <MetricBlock label="Patterns" value="4" unit="active" divider />
-        <MetricBlock label="Best run" value="+7" divider />
+        <MetricBlock label="Total" value={String(weekly.total)} />
+        <MetricBlock label="Avg/day" value={String(Math.round(weekly.total / Math.max(1, weekly.days.length)))} divider />
+        <MetricBlock label={weekly.compareLabel} value={`${weekly.changePct > 0 ? "+" : ""}${weekly.changePct}%`} divider />
       </div>
     </section>
   );
@@ -3433,12 +3228,19 @@ function formatGameDate(endTime?: number) {
 
 function cleanDisplayName(name: string) {
   const cleaned = name.trim();
-  if (!cleaned || cleaned.toLowerCase() === "sample") return "Ola";
+  if (!cleaned || cleaned.toLowerCase() === "sample") return "Chess player";
   return cleaned.length > 18 ? `${cleaned.slice(0, 18)}...` : cleaned;
 }
 
 function titleCase(value: string) {
   return value.slice(0, 1).toUpperCase() + value.slice(1);
+}
+
+function timeOfDayGreeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
 }
 
 function todayLabel() {
