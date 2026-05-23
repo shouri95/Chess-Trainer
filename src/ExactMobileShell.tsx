@@ -813,48 +813,6 @@ function MobileStackedDay({ day, max, today }: { day: { day: string; b: number; 
   );
 }
 
-function MobileGamesSurface({ games, setSelectedGameId }: {
-  games: GameSummary[];
-  setSelectedGameId: (id: number) => void;
-}) {
-  const [filter, setFilter] = useState<"all" | "mistakes" | "white" | "black">("mistakes");
-  const visibleGames = useMemo(() => games.filter(game => {
-    if (filter === "mistakes") return game.issues > 0;
-    if (filter === "white" || filter === "black") return game.color === filter;
-    return true;
-  }), [filter, games]);
-  const chips = [
-    { id: "all", label: "All" },
-    { id: "mistakes", label: "With mistakes" },
-    { id: "white", label: "White" },
-    { id: "black", label: "Black" },
-  ] as const;
-
-  return (
-    <section className="pc-mobile-surface pc-mobile-games">
-      <MobilePageHead eyebrow={`${visibleGames.length} of ${games.length} games`} title="Games" />
-      <div className="pc-mobile-chip-row">
-        {chips.map(chip => (
-          <button key={chip.id} type="button" className={filter === chip.id ? "active" : ""} onClick={() => setFilter(chip.id)}>
-            {chip.label}
-          </button>
-        ))}
-      </div>
-      <div className="pc-mobile-row-list">
-        {visibleGames.map((game, i) => (
-          <button key={game.id} className="pc-mobile-game-row" type="button" onClick={() => setSelectedGameId(game.id)}>
-            <span className={game.result}>{game.result === "win" ? "W" : game.result === "loss" ? "L" : game.result === "draw" ? "D" : "?"}</span>
-            <div><strong>{game.opponent || "Unknown opponent"}</strong><small>{[game.opening, game.timeClass, formatGameDate(game.endTime)].filter(Boolean).join(" · ")}</small></div>
-            <b>{game.issues || (i % 3 === 0 ? 3 : "—")}</b>
-            <em>›</em>
-          </button>
-        ))}
-        {!visibleGames.length && <div className="pc-mobile-empty-inline">No games match this filter.</div>}
-      </div>
-    </section>
-  );
-}
-
 function MobileMistakeLabSurface({
   report,
   reviews,

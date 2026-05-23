@@ -56,7 +56,7 @@ export type MoveEngineResult = {
   confidence: EngineConfidence;
 };
 
-export const DEFAULT_ENGINE_DEPTH = 12;
+export const DEFAULT_ENGINE_DEPTH = 15;
 export const DEFAULT_ENGINE_MULTIPV = 4;
 const ENGINE_CACHE_LIMIT = 300;
 
