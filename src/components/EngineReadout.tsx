@@ -62,6 +62,7 @@ export function EvalBar({ evaluation, flipped = false }: { evaluation?: EngineEv
 export function formatEval(evalCp?: number, mate?: number) {
   if (typeof mate === "number") return mate > 0 ? `M${mate}` : `-M${Math.abs(mate)}`;
   if (typeof evalCp !== "number") return "";
+  if (Math.abs(evalCp) >= 90_000) return evalCp > 0 ? "+M" : "-M";
   const pawns = evalCp / 100;
   return `${pawns > 0 ? "+" : ""}${pawns.toFixed(1)}`;
 }

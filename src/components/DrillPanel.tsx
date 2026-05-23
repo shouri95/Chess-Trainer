@@ -7,7 +7,7 @@ import { EngineEvaluation, useStockfish } from "../engine/useStockfish";
 import { DEFAULT_ENGINE_DEPTH } from "../engine/EngineService";
 import { judgeDrillMove } from "../chess/drillEvaluator";
 
-type TrainableQuality = "blunder" | "miss" | "mistake";
+type TrainableQuality = "blunder" | "miss" | "mistake" | "inaccuracy";
 
 interface Props {
   issues: MoveIssue[];
@@ -30,7 +30,7 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
   const [feedback, setFeedback] = useState<"idle" | "thinking" | "correct" | "wrong" | "theory" | "engine">("idle");
   const [score, setScore] = useState(0);
   const [attempts, setAttempts] = useState(0);
-  const [completed, setCompleted] = useState<Set<number>>(new Set());
+  const [completed, setCompleted] = useState<Set<string>>(new Set());
   const [currentFen, setCurrentFen] = useState("");
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | undefined>();
   const [bestMove, setBestMove] = useState("");
@@ -44,34 +44,21 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
   const actionTokenRef = useRef(0);
   const { ready, error, evaluatePosition } = useStockfish();
   const effectiveQuality: TrainableQuality | "all" =
-    qualityFilter === "miss" || qualityFilter === "mistake" || qualityFilter === "all" ? qualityFilter : "blunder";
+    qualityFilter === "all" ? "all"
+      : qualityFilter === "blunder" || qualityFilter === "miss" || qualityFilter === "mistake" || qualityFilter === "inaccuracy" ? qualityFilter
+      : "blunder";
 
   const trainingIssues = useMemo(() => {
-    const seen = new Set<string>();
     return issues
       .filter(issue => patternId === "all" || issue.id === patternId)
       .filter(issue => effectiveQuality === "all" || issueQualityBucket(issue) === effectiveQuality)
-      .sort((a, b) => b.severity - a.severity)
-      .filter(issue => {
-        const key = `${issue.fenBefore}|${issue.id}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
+      .sort((a, b) => b.severity - a.severity);
   }, [issues, patternId, effectiveQuality]);
 
   const issue = trainingIssues[index] || trainingIssues[0];
   const categoryCards = useMemo(() => {
-    const unique = (source: MoveIssue[]) => {
-      const seen = new Set<string>();
-      return source.filter(issue => {
-        if (effectiveQuality !== "all" && issueQualityBucket(issue) !== effectiveQuality) return false;
-        const key = `${issue.fenBefore}|${issue.id}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    };
+    const unique = (source: MoveIssue[]) => source
+      .filter(issue => effectiveQuality === "all" || issueQualityBucket(issue) === effectiveQuality);
     return [
       {
         id: "all",
@@ -159,7 +146,7 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
       setJudgementText(judgement.message);
 
       const board = new Chess(currentFen);
-      const played = board.move({ from, to, promotion: promotion || "q" });
+      const played = board.move({ from, to, promotion });
       if (!played) {
         if (!mountedRef.current || actionToken !== actionTokenRef.current) return;
         setFeedback("wrong");
@@ -171,7 +158,7 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
         if (!mountedRef.current || actionToken !== actionTokenRef.current) return;
         setFeedback(judgement.status);
         setScore(prev => prev + 1);
-        setCompleted(prev => new Set([...prev, index]));
+        setCompleted(prev => new Set([...prev, issueKey(issue)]));
         setCurrentFen(board.fen());
       } else {
         if (!mountedRef.current || actionToken !== actionTokenRef.current) return;
@@ -185,7 +172,7 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
       setFeedback("wrong");
       movePendingRef.current = false;
     }
-  }, [issue, index, currentFen, evaluatePosition, feedback]);
+  }, [issue, currentFen, evaluatePosition, feedback]);
 
   const resetPosition = () => {
     actionTokenRef.current += 1;
@@ -265,13 +252,13 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
           <button className="ghost-button" onClick={onBack}>Exit drills</button>
         </div>
         <div className="drill-tabs">
-          {(["all", "blunder", "miss", "mistake"] as Array<TrainableQuality | "all">).map(quality => (
+          {(["all", "blunder", "miss", "mistake", "inaccuracy"] as Array<TrainableQuality | "all">).map(quality => (
             <button
               key={quality}
               className={effectiveQuality === quality ? "active" : ""}
               onClick={() => onQualityFilterChange?.(quality)}
             >
-              {quality === "all" ? "All" : quality === "blunder" ? "Blunders" : quality === "miss" ? "Misses" : "Mistakes"}
+              {quality === "all" ? "All" : quality === "blunder" ? "Blunders" : quality === "miss" ? "Misses" : quality === "inaccuracy" ? "Inaccuracies" : "Mistakes"}
             </button>
           ))}
         </div>
@@ -285,7 +272,7 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
           </select>
         </label>
         <div className="empty-drill-state">
-          <h3>No {effectiveQuality === "all" ? "mistakes" : effectiveQuality === "blunder" ? "blunders" : effectiveQuality === "miss" ? "misses" : "mistakes"} in this category</h3>
+          <h3>No {effectiveQuality === "all" ? "mistakes" : effectiveQuality === "blunder" ? "blunders" : effectiveQuality === "miss" ? "misses" : effectiveQuality === "inaccuracy" ? "inaccuracies" : "mistakes"} in this category</h3>
           <p>Choose another mistake type or return to Mistake Lab to pick a different training theme.</p>
         </div>
       </div>
@@ -346,10 +333,13 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
         {judgementText && feedback === "wrong" && (
           <p className="drill-consequence"><span>Consequence</span>{judgementText}</p>
         )}
+        {feedback === "idle" && (
+          <p className="drill-consequence"><span>Coach cue</span>{trainingPrompt(issue)}</p>
+        )}
         {engineLine && (feedback === "correct" || feedback === "wrong") && <small>{engineLine.split(" ").slice(0, 5).map(formatUci).join(" ")}</small>}
         <div className="status-segments" aria-label={`${completed.size} of ${trainingIssues.length} completed`}>
-          {trainingIssues.slice(0, 12).map((_, segmentIndex) => (
-            <i key={segmentIndex} className={completed.has(segmentIndex) ? "done" : segmentIndex === index ? "current" : ""} />
+          {trainingIssues.slice(0, 12).map((segment, segmentIndex) => (
+            <i key={issueKey(segment)} className={completed.has(issueKey(segment)) ? "done" : segmentIndex === index ? "current" : ""} />
           ))}
         </div>
       </div>
@@ -364,13 +354,13 @@ export default function DrillPanel({ issues, summaries = [], initialIssue, quali
       <details className="drill-filter-drawer">
         <summary>Training set</summary>
       <div className="drill-tabs">
-          {(["all", "blunder", "miss", "mistake"] as Array<TrainableQuality | "all">).map(quality => (
+          {(["all", "blunder", "miss", "mistake", "inaccuracy"] as Array<TrainableQuality | "all">).map(quality => (
             <button
               key={quality}
               className={effectiveQuality === quality ? "active" : ""}
             onClick={() => onQualityFilterChange?.(quality)}
           >
-              {quality === "all" ? "All" : quality === "blunder" ? "Blunders" : quality === "miss" ? "Misses" : "Mistakes"}
+              {quality === "all" ? "All" : quality === "blunder" ? "Blunders" : quality === "miss" ? "Misses" : quality === "inaccuracy" ? "Inaccuracies" : "Mistakes"}
           </button>
         ))}
       </div>
@@ -394,8 +384,18 @@ function issueQuality(issue: MoveIssue): MoveReviewQuality {
 
 function issueQualityBucket(issue: MoveIssue): TrainableQuality {
   const quality = issueQuality(issue);
-  if (quality === "blunder" || quality === "miss") return quality;
+  if (quality === "blunder" || quality === "miss" || quality === "inaccuracy") return quality;
   return "mistake";
+}
+
+function issueKey(issue: MoveIssue) {
+  return [
+    issue.gameUrl || "local",
+    issue.moveNumber,
+    issue.uci,
+    issue.fenBefore,
+    issue.id,
+  ].join("|");
 }
 
 function severityToQuality(severity: number): MoveReviewQuality {
@@ -411,6 +411,7 @@ function trainingPrompt(issue: MoveIssue) {
   if (issue.id === "kingShelter") return "Your king safety is the theme. Find the move that avoids opening lines around your king.";
   if (issue.id === "conversion") return "You have something to convert. Prefer moves that reduce counterplay or simplify cleanly.";
   if (issue.id === "delayedCastle") return "Your king is still a long-term target. Find the move that improves king safety.";
+  if (issue.id === "engineMistake") return "Find the move the engine prefers, then name the concrete threat or defensive resource it creates.";
   return "Solve this like a real game position. Choose the move you wish you had played.";
 }
 

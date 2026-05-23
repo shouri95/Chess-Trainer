@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useEffect, useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef, type KeyboardEvent, type PointerEvent } from "react";
 import { Chess, Square } from "chess.js";
 import { Search } from "lucide-react";
 
@@ -23,8 +23,6 @@ const promotionPieces = ["q", "r", "b", "n"];
 type DragState = {
   from: string;
   piece: { color: "w" | "b"; type: string };
-  x: number;
-  y: number;
   startX: number;
   startY: number;
   squareSize: number;
@@ -49,9 +47,19 @@ function sqFromIndex(index: number, flipped: boolean): string {
   return `${f}${r}`;
 }
 
+function indexFromSq(square: string, flipped: boolean) {
+  const file = files.indexOf(square[0]);
+  const rank = Number(square[1]);
+  if (file < 0 || rank < 1 || rank > 8) return 0;
+  const col = flipped ? 7 - file : file;
+  const row = flipped ? rank - 1 : 8 - rank;
+  return row * 8 + col;
+}
+
 export default function ChessBoard({ fen, flipped = false, highlightSquares, arrows, lastMove, onMove, onGestureBack, onGestureForward, onAnalyze, showToolbar = false, interactive, size = 480 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
+  const dragGhostRef = useRef<HTMLSpanElement | null>(null);
   const gestureRef = useRef<{ x: number; y: number; t: number } | null>(null);
   const suppressClickRef = useRef(false);
   const manualFlipRef = useRef(false);
@@ -62,6 +70,7 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
   const [hoverSquare, setHoverSquare] = useState<string | null>(null);
   const [promotion, setPromotion] = useState<PromotionState | null>(null);
   const [shakeSquare, setShakeSquare] = useState<string | null>(null);
+  const [focusedSquare, setFocusedSquare] = useState<string | null>(null);
   const game = useMemo(() => {
     try { return new Chess(fen); } catch { return new Chess(); }
   }, [fen]);
@@ -83,6 +92,7 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
     setDrag(null);
     setPromotion(null);
     setHoverSquare(null);
+    setFocusedSquare(null);
   }, [fen]);
 
   useEffect(() => {
@@ -130,7 +140,7 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
       setPromotion({ from, to, color: piece.color });
       return true;
     }
-    onMove(from, to, promotionChoice || (piece.type === "p" && (to.endsWith("8") || to.endsWith("1")) ? "q" : undefined));
+    onMove(from, to, promotionChoice);
     setSelected(null);
     setPromotion(null);
     return true;
@@ -143,6 +153,7 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
     }
     if (!interactive || !onMove) return;
     const sq = sqFromIndex(index, boardFlipped);
+    setFocusedSquare(sq);
     const piece = game.get(sq as Square);
     if (!selected) {
       if (piece?.color === game.turn()) setSelected(sq);
@@ -188,14 +199,12 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
       setDrag({
         from: sq,
         piece: { color: piece.color, type: piece.type },
-        x: event.clientX,
-        y: event.clientY,
-	        startX: event.clientX,
-	        startY: event.clientY,
-	        squareSize,
-	        flipped: boardFlipped,
-	        active: false,
-	      });
+        startX: event.clientX,
+        startY: event.clientY,
+        squareSize,
+        flipped: boardFlipped,
+        active: false,
+      });
       gestureRef.current = null;
     } else {
       gestureRef.current = { x: event.clientX, y: event.clientY, t: Date.now() };
@@ -210,8 +219,14 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
   const handleGridPointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
     if (!drag) return;
     const moved = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 6;
-    setDrag(current => current ? { ...current, x: event.clientX, y: event.clientY, active: current.active || moved } : current);
-    setHoverSquare(squareAtPoint(event.clientX, event.clientY, drag));
+    if (dragGhostRef.current) {
+      dragGhostRef.current.style.transform = dragTransform(event.clientX, event.clientY, drag.squareSize, gridRef.current);
+    }
+    if (!drag.active && moved) {
+      setDrag(current => current ? { ...current, active: true } : current);
+    }
+    const nextHover = squareAtPoint(event.clientX, event.clientY, drag);
+    setHoverSquare(current => current === nextHover ? current : nextHover);
   }, [drag, squareAtPoint]);
 
   const handleGridPointerUp = useCallback((event: PointerEvent<HTMLDivElement>) => {
@@ -243,6 +258,24 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
   }, [drag, legalTargets, onGestureBack, onGestureForward, requestMove, squareAtPoint]);
 
   const handleKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (interactive) {
+      const current = focusedSquare || selected || sqFromIndex(0, boardFlipped);
+      if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+        event.preventDefault();
+        const index = indexFromSq(current, boardFlipped);
+        const col = index % 8;
+        const row = Math.floor(index / 8);
+        const nextCol = event.key === "ArrowLeft" ? Math.max(0, col - 1) : event.key === "ArrowRight" ? Math.min(7, col + 1) : col;
+        const nextRow = event.key === "ArrowUp" ? Math.max(0, row - 1) : event.key === "ArrowDown" ? Math.min(7, row + 1) : row;
+        setFocusedSquare(sqFromIndex(nextRow * 8 + nextCol, boardFlipped));
+        return;
+      }
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        handleClick(indexFromSq(current, boardFlipped));
+        return;
+      }
+    }
     if (event.key === "ArrowLeft" && onGestureBack) {
       event.preventDefault();
       onGestureBack();
@@ -264,7 +297,7 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
       setSelected(null);
       setPromotion(null);
     }
-  }, [onGestureBack, onGestureForward]);
+  }, [boardFlipped, focusedSquare, handleClick, interactive, onGestureBack, onGestureForward, selected]);
 
   const isLight = (index: number) => (Math.floor(index / 8) + (index % 8)) % 2 === 0;
   const hasBoardControls = showToolbar && (interactive || onGestureBack || onGestureForward || onAnalyze);
@@ -304,6 +337,7 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
             const sq = sqFromIndex(index, boardFlipped);
             const highlight = highlightSquares?.[sq];
             const isSelected = selected === sq;
+            const isKeyboardFocus = focusedSquare === sq;
             const legalInfo = legalMoveInfo.get(sq);
             const isLegalTarget = Boolean(legalInfo);
             const isLastMove = lastMove?.from === sq || lastMove?.to === sq;
@@ -319,6 +353,7 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
                   isL ? "light" : "dark",
                   interactive ? "interactive" : "",
                   isSelected ? "selected" : "",
+                  isKeyboardFocus ? "keyboard-focus" : "",
                   isLegalTarget ? "legal-target" : "",
                   legalInfo?.capture ? "legal-capture" : "",
                   legalInfo?.check ? "legal-check" : "",
@@ -327,6 +362,7 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
                   isDragSource ? "drag-source" : "",
                   shakeSquare === sq ? "shake" : "",
                 ].filter(Boolean).join(" ")}
+                data-square={sq}
                 role="gridcell"
                 aria-label={`${sq}${piece ? `, ${piece.color === "w" ? "white" : "black"} ${accessiblePieceName(piece.type)}` : ", empty"}`}
                 style={{ width: squareSize, height: squareSize, background: highlight }}
@@ -358,31 +394,23 @@ export default function ChessBoard({ fen, flipped = false, highlightSquares, arr
           {arrows?.map((arrow, i) => <BoardArrow key={`${arrow.from}-${arrow.to}-${i}`} arrow={arrow} squareSize={squareSize} flipped={boardFlipped} />)}
           {drag && (
             <span
+              ref={dragGhostRef}
               className={`piece drag-ghost ${drag.piece.color === "w" ? "white" : "black"}`}
               style={{
                 width: squareSize * 0.82,
                 height: squareSize * 0.82,
-	                transform: `translate(${drag.x - (gridRef.current?.getBoundingClientRect().left ?? 0) - drag.squareSize * 0.41}px, ${drag.y - (gridRef.current?.getBoundingClientRect().top ?? 0) - drag.squareSize * 0.41}px)`,
+	                transform: dragTransform(drag.startX, drag.startY, drag.squareSize, gridRef.current),
               }}
             >
               <PieceVector type={drag.piece.type} />
             </span>
           )}
           {promotion && (
-            <div className={`promotion-picker ${promotion.color === "w" ? "white" : "black"}`} style={promotionStyle(promotion.to, squareSize, boardFlipped)}>
-              {promotionPieces.map(pieceType => (
-                <button
-                  type="button"
-                  key={pieceType}
-                  onClick={() => requestMove(promotion.from, promotion.to, pieceType)}
-                  aria-label={`Promote to ${pieceName(pieceType)}`}
-                >
-                  <span className={`piece ${promotion.color === "w" ? "white" : "black"}`}>
-                    <PieceVector type={pieceType} />
-                  </span>
-                </button>
-              ))}
-            </div>
+            <PromotionPicker
+              promotion={promotion}
+              squareSize={squareSize}
+              onPromote={requestMove}
+            />
           )}
         </div>
       </div>
@@ -490,6 +518,11 @@ function promotionStyle(square: string, squareSize: number, flipped: boolean) {
   };
 }
 
+function dragTransform(clientX: number, clientY: number, squareSize: number, grid: HTMLDivElement | null) {
+  const rect = grid?.getBoundingClientRect();
+  return `translate(${clientX - (rect?.left ?? 0) - squareSize * 0.41}px, ${clientY - (rect?.top ?? 0) - squareSize * 0.41}px)`;
+}
+
 function pieceName(type: string) {
   return type === "q" ? "queen" : type === "r" ? "rook" : type === "b" ? "bishop" : "knight";
 }
@@ -501,4 +534,51 @@ function accessiblePieceName(type: string) {
     type === "r" ? "rook" :
     type === "q" ? "queen" :
     "king";
+}
+
+function PromotionPicker({ promotion, squareSize, onPromote }: {
+  promotion: { from: string; to: string; color: "w" | "b" };
+  squareSize: number;
+  onPromote: (from: string, to: string, piece: string) => void;
+}) {
+  const [style, setStyle] = useState({ left: 0, top: 0, width: squareSize });
+  useLayoutEffect(() => {
+    const square = document.querySelector(`[data-square="${promotion.to}"]`) as HTMLElement | null;
+    const rect = square?.getBoundingClientRect();
+    const pickerWidth = squareSize;
+    const pickerHeight = squareSize * 4;
+    if (!rect) {
+      setStyle({ left: 0, top: 0, width: pickerWidth });
+      return;
+    }
+    const padding = 4;
+    let left = rect.left + window.scrollX - (pickerWidth / 2) + (rect.width / 2);
+    let top = rect.top + window.scrollY - pickerHeight - padding;
+    // Clamp to viewport bounds
+    left = Math.max(8, Math.min(window.innerWidth - pickerWidth - 8, left));
+    if (rect.top < window.innerHeight / 2) {
+      top = rect.bottom + window.scrollY + padding;
+      top = Math.max(8, Math.min(window.innerHeight - pickerHeight - 8, top));
+    } else {
+      top = Math.max(8, Math.min(window.innerHeight - pickerHeight - 8, top));
+    }
+    setStyle({ left, top, width: pickerWidth });
+  }, [promotion.to, squareSize]);
+
+  return (
+    <div className={`promotion-picker ${promotion.color === "w" ? "white" : "black"}`} style={{ ...style, position: "fixed", zIndex: 50 }}>
+      {promotionPieces.map(pieceType => (
+        <button
+          type="button"
+          key={pieceType}
+          onClick={() => onPromote(promotion.from, promotion.to, pieceType)}
+          aria-label={`Promote to ${pieceName(pieceType)}`}
+        >
+          <span className={`piece ${promotion.color === "w" ? "white" : "black"}`}>
+            <PieceVector type={pieceType} />
+          </span>
+        </button>
+      ))}
+    </div>
+  );
 }

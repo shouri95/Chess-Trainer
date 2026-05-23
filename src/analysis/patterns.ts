@@ -6,7 +6,7 @@ type Phase = "opening" | "middlegame" | "endgame";
 type PatternId =
   | "loosePiece" | "missedForcingMove" | "twoMoveBlindspot"
   | "kingShelter" | "delayedCastle" | "openingTempo"
-  | "queenEarly" | "endgameKing" | "conversion";
+  | "queenEarly" | "endgameKing" | "conversion" | "engineMistake";
 
 type MoveIssue = {
   id: PatternId;
@@ -178,6 +178,7 @@ const copy: Record<PatternId, { title: string; advice: string }> = {
   queenEarly: { title: "Queen out too early", advice: "Delay queen adventures until minors are developed and king is safe." },
   endgameKing: { title: "Passive endgame king", advice: "When queens are off, the king becomes a fighting piece. Move it toward the center." },
   conversion: { title: "Not simplifying wins", advice: "When ahead in material, prefer trades and king safety over complications." },
+  engineMistake: { title: "Engine-only mistakes", advice: "Use the engine line as a signal, then look for the concrete reason the candidate move works." },
 };
 
 const skillLabels: Record<SkillDimension, string> = {
@@ -193,7 +194,7 @@ const skillLabels: Record<SkillDimension, string> = {
 
 const files = "abcdefgh";
 
-export function analyzeChessComGames(username: string, games: ChessComGame[]): AnalysisReport {
+export async function analyzeChessComGames(username: string, games: ChessComGame[]): Promise<AnalysisReport> {
   return analyzeParsedGames(username, games.map(game => ({
     pgn: game.pgn, url: game.url,
     white: game.white.username, black: game.black.username,
@@ -205,14 +206,14 @@ export function analyzeChessComGames(username: string, games: ChessComGame[]): A
   })));
 }
 
-export function analyzePgnText(username: string, pgnText: string): AnalysisReport {
+export async function analyzePgnText(username: string, pgnText: string): Promise<AnalysisReport> {
   return analyzeParsedGames(username, splitPgnText(pgnText).map(pgn => ({
     pgn, ...headersFromPgn(pgn),
     opening: openingFromGame(undefined, pgn)
   })));
 }
 
-function analyzeParsedGames(username: string, games: ParsedGame[]): AnalysisReport {
+async function analyzeParsedGames(username: string, games: ParsedGame[]): Promise<AnalysisReport> {
   const normalizedUser = username.trim().toLowerCase();
   const issues: MoveIssue[] = [];
   const moveReviews: MoveReview[] = [];
@@ -239,6 +240,9 @@ function analyzeParsedGames(username: string, games: ParsedGame[]): AnalysisRepo
   let ratingSamples = 0;
 
   for (const [gameId, game] of games.entries()) {
+    if (gameId % 5 === 0 && gameId > 0) {
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+    }
     const chess = new Chess();
     try { chess.loadPgn(game.pgn, { strict: false }); } catch { continue; }
 
@@ -585,6 +589,7 @@ function analyzeMove({
     queenEarly: "positional",
     endgameKing: "endgame",
     conversion: "conversion",
+    engineMistake: "tactical",
   };
 
   // Detect loose pieces. Do not punish a forcing capture that wins substantial
@@ -687,8 +692,10 @@ function getPhase(fen: string, ply: number): Phase {
   const queens = countPieces(chess, "q");
   const minors = countPieces(chess, "n") + countPieces(chess, "b");
   const rooks = countPieces(chess, "r");
-  if (ply >= 70 || material <= 20 || (queens === 0 && (material <= 30 || minors <= 2 || rooks <= 2))) return "endgame";
   if (ply <= 20) return "opening";
+  if (ply >= 70) return "endgame";
+  if (ply >= 40 && material <= 20) return "endgame";
+  if (ply >= 30 && queens === 0 && (material <= 30 || minors <= 2 || rooks <= 2)) return "endgame";
   return "middlegame";
 }
 

@@ -55,13 +55,32 @@ function cleanUsername(username: string) {
   return user;
 }
 
+async function fetchChessCom(url: string) {
+  let lastRateLimit: Response | null = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response) {
+      if (lastRateLimit) return lastRateLimit;
+      throw new Error("Chess.com request failed.");
+    }
+    if (response.status !== 429 || attempt === 2) return response;
+    lastRateLimit = response;
+    const retryAfterSeconds = Number(response.headers?.get?.("retry-after"));
+    const retryAfterMs = Number.isFinite(retryAfterSeconds)
+      ? retryAfterSeconds * 1000
+      : 750 * 2 ** attempt;
+    await new Promise(resolve => globalThis.setTimeout(resolve, retryAfterMs));
+  }
+  return fetch(url, { cache: "no-store" });
+}
+
 export async function fetchChessComProfile(username: string): Promise<ChessComProfile> {
   const user = cleanUsername(username);
   if (!user) {
     throw new Error("Enter a Chess.com username first.");
   }
 
-  const response = await fetch(`https://api.chess.com/pub/player/${encodeURIComponent(user)}`, { cache: "no-store" });
+  const response = await fetchChessCom(`https://api.chess.com/pub/player/${encodeURIComponent(user)}`);
   if (response.status === 404) {
     throw new Error(`No public Chess.com profile was found for "${username}".`);
   }
@@ -85,7 +104,7 @@ export async function fetchChessComGames(
   }
 
   onProgress?.({ label: "Finding monthly archives", done: 0, total: 1 });
-  const archiveResponse = await fetch(`https://api.chess.com/pub/player/${encodeURIComponent(user)}/games/archives`, { cache: "no-store" });
+  const archiveResponse = await fetchChessCom(`https://api.chess.com/pub/player/${encodeURIComponent(user)}/games/archives`);
 
   if (archiveResponse.status === 404) {
     throw new Error(`No public Chess.com profile was found for "${username}".`);
@@ -102,12 +121,11 @@ export async function fetchChessComGames(
 
   for (let batchStart = 0; batchStart < selectedArchives.length && games.length < maxGames; batchStart += 3) {
     const batch = selectedArchives.slice(batchStart, batchStart + 3);
-    await Promise.all(batch.map(async (archiveUrl) => {
-      if (games.length >= maxGames) return;
+    const batchGames = await Promise.all(batch.map(async (archiveUrl) => {
       const month = archiveUrl.split("/").slice(-2).join("/");
       onProgress?.({ label: `Importing ${month}`, done, total: selectedArchives.length });
 
-      const response = await fetch(archiveUrl, { cache: "no-store" });
+      const response = await fetchChessCom(archiveUrl);
       if (response.status === 429) {
         throw new Error("Chess.com rate-limited the import. Try fewer months or wait a minute.");
       }
@@ -122,14 +140,19 @@ export async function fetchChessComGames(
           const matchesTimeClass = timeClass === "all" || game.time_class === timeClass;
           return isStandardChess && hasPgn && matchesTimeClass;
         });
-      games.push(...matchingGames);
-      if (games.length > maxGames) {
-        games.sort((a, b) => (b.end_time ?? 0) - (a.end_time ?? 0));
-        games.length = maxGames;
-      }
       done += 1;
       onProgress?.({ label: `Imported ${month}`, done, total: selectedArchives.length });
+      return matchingGames;
     }));
+    games.push(...batchGames.flat());
+    if (games.length > maxGames) {
+      const newest = games
+        .slice()
+        .sort((a, b) => (b.end_time ?? 0) - (a.end_time ?? 0))
+        .slice(0, maxGames);
+      games.length = 0;
+      games.push(...newest);
+    }
   }
 
   onProgress?.({ label: "Import complete", done: selectedArchives.length, total: selectedArchives.length });

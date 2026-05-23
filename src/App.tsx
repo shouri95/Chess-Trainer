@@ -1,4 +1,4 @@
-import { Component, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Component, ReactNode, type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import {
   Activity, ArrowLeft, BarChart3, Brain, ChevronLeft, ChevronRight,
@@ -13,7 +13,8 @@ import DrillPanel from "./components/DrillPanel";
 import { formatEval as formatEngineEval, formatUci as formatEngineUci } from "./components/EngineReadout";
 import { EngineEvaluation, useStockfish } from "./engine/useStockfish";
 import { classifyMoveQuality, DEFAULT_ENGINE_DEPTH, DEFAULT_ENGINE_MULTIPV, type MoveEngineResult } from "./engine/EngineService";
-import { isPlaceholderUsername, normalizeStoredProfile, shouldAutoSyncProfile } from "./appPersistence";
+import { isPlaceholderUsername, normalizeStoredProfile, readStorageValue, removeStorageValue, shouldAutoSyncProfile, writeStorageValue } from "./appPersistence";
+import { ExactMobileImport, ExactPatternCoachMobile } from "./ExactMobileShell";
 
 const samplePgn = `[Event "Training sample"]
 [Site "https://www.chess.com/game/live/sample"]
@@ -31,16 +32,22 @@ const PROFILE_STORAGE_KEY = "pattern-coach-profile";
 const REPORT_STORAGE_KEY = "pattern-coach-report";
 const SYNC_META_STORAGE_KEY = "pattern-coach-sync-meta";
 const BACKGROUND_ENGINE_REVIEW_LIMIT = 36;
-const BACKGROUND_SYNC_INTERVAL_MS = 30_000;
+const BACKGROUND_SYNC_INTERVAL_MS = 15 * 60_000;
+const BACKGROUND_SYNC_MIN_GAP_MS = 10 * 60_000;
 const LATEST_SYNC_MONTHS = 2;
-type ReviewBucket = "blunder" | "miss" | "mistake" | "good" | "best";
-type TrainableReviewBucket = "blunder" | "miss" | "mistake";
+const DEFAULT_MONTHS = 3;
+const DEFAULT_GAME_LIMIT = 25;
+const DEFAULT_TIME_CLASS: "all" | "rapid" | "blitz" | "bullet" | "daily" = "all";
+const MATE_CP_THRESHOLD = 90_000;
+type ReviewBucket = "blunder" | "miss" | "mistake" | "inaccuracy" | "good" | "best";
+type TrainableReviewBucket = "blunder" | "miss" | "mistake" | "inaccuracy";
 
 type AnalysisStart = {
   fen: string;
   flipped?: boolean;
   title?: string;
   gamePgn?: string;
+  returnMistakeReviewId?: string;
 };
 
 type SyncMeta = {
@@ -62,13 +69,13 @@ const dimensionLabels: Record<SkillDimension, string> = {
 };
 
 function loadSavedReport() {
-  const saved = localStorage.getItem(REPORT_STORAGE_KEY);
+  const saved = readStorageValue(REPORT_STORAGE_KEY);
   if (!saved) return null;
   try {
     const parsed = JSON.parse(saved) as { report?: AnalysisReport };
     return parsed.report ?? null;
   } catch {
-    localStorage.removeItem(REPORT_STORAGE_KEY);
+    removeStorageValue(REPORT_STORAGE_KEY);
     return null;
   }
 }
@@ -82,11 +89,27 @@ function findMatchingIssue(report: AnalysisReport, issue: MoveIssue | null) {
   ) ?? null;
 }
 
+function normalizeChessComUsername(value: string) {
+  return value.trim().replace(/^@/, "").toLowerCase();
+}
+
+function sameChessComUsername(a: string, b: string) {
+  const left = normalizeChessComUsername(a);
+  const right = normalizeChessComUsername(b);
+  return Boolean(left && right && left === right);
+}
+
+function friendlySyncMessage(message?: string) {
+  if (!message) return "";
+  if (/worker failed/i.test(message)) return "Sync needs retry.";
+  return message;
+}
+
 export default function App() {
   const [username, setUsername] = useState("");
-  const [months, setMonths] = useState(3);
-  const [gameLimit, setGameLimit] = useState(150);
-  const [timeClass, setTimeClass] = useState<"all" | "rapid" | "blitz" | "bullet" | "daily">("all");
+  const [months, setMonths] = useState(DEFAULT_MONTHS);
+  const [gameLimit, setGameLimit] = useState(DEFAULT_GAME_LIMIT);
+  const [timeClass, setTimeClass] = useState<"all" | "rapid" | "blitz" | "bullet" | "daily">(DEFAULT_TIME_CLASS);
   const [pgnText, setPgnText] = useState("");
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [selectedIssue, setSelectedIssue] = useState<MoveIssue | null>(null);
@@ -105,11 +128,18 @@ export default function App() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [profileHydrated, setProfileHydrated] = useState(false);
+  const [connectedUsername, setConnectedUsername] = useState("");
   const [syncMeta, setSyncMeta] = useState<SyncMeta>({ status: "idle" });
   const { evaluatePosition, analyzeMovePair } = useStockfish();
   const analysisAbortRef = useRef<AbortController | null>(null);
   const autoSyncRef = useRef("");
   const syncInFlightRef = useRef(false);
+  const syncMetaRef = useRef(syncMeta);
+  const lastBackgroundSyncRef = useRef(0);
+
+  useEffect(() => {
+    syncMetaRef.current = syncMeta;
+  }, [syncMeta]);
 
   const openAnalysis = (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => {
     if (!fen) return;
@@ -119,12 +149,15 @@ export default function App() {
   };
 
   useEffect(() => {
-    const saved = localStorage.getItem(PROFILE_STORAGE_KEY);
+    const saved = readStorageValue(PROFILE_STORAGE_KEY);
     const savedReport = loadSavedReport();
     try {
       if (saved) {
         const parsed = normalizeStoredProfile(JSON.parse(saved));
-        if (parsed.username) setUsername(parsed.username);
+        if (parsed.username) {
+          setUsername(parsed.username);
+          setConnectedUsername(parsed.username);
+        }
         if (parsed.months) setMonths(parsed.months);
         if (parsed.gameLimit) setGameLimit(parsed.gameLimit);
         if (parsed.timeClass) setTimeClass(parsed.timeClass);
@@ -133,11 +166,11 @@ export default function App() {
         setReport(savedReport);
         setSelectedIssue(savedReport.summaries[0]?.examples[0] ?? null);
       }
-      const savedSync = localStorage.getItem(SYNC_META_STORAGE_KEY);
+      const savedSync = readStorageValue(SYNC_META_STORAGE_KEY);
       if (savedSync) setSyncMeta(JSON.parse(savedSync) as SyncMeta);
     } catch {
-      localStorage.removeItem(PROFILE_STORAGE_KEY);
-      localStorage.removeItem(SYNC_META_STORAGE_KEY);
+      removeStorageValue(PROFILE_STORAGE_KEY);
+      removeStorageValue(SYNC_META_STORAGE_KEY);
     } finally {
       setProfileHydrated(true);
     }
@@ -145,26 +178,44 @@ export default function App() {
 
   useEffect(() => {
     if (!profileHydrated) return;
-    if (username && !isPlaceholderUsername(username)) {
-      localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ username, months, gameLimit, timeClass }));
+    if (connectedUsername && !isPlaceholderUsername(connectedUsername)) {
+      writeStorageValue(PROFILE_STORAGE_KEY, JSON.stringify({ username: connectedUsername, months, gameLimit, timeClass }));
     } else {
-      localStorage.removeItem(PROFILE_STORAGE_KEY);
+      removeStorageValue(PROFILE_STORAGE_KEY);
     }
-  }, [username, months, gameLimit, timeClass]);
+  }, [profileHydrated, connectedUsername, months, gameLimit, timeClass]);
 
   useEffect(() => {
     if (!profileHydrated) return;
-    localStorage.setItem(SYNC_META_STORAGE_KEY, JSON.stringify(syncMeta));
+    writeStorageValue(SYNC_META_STORAGE_KEY, JSON.stringify(syncMeta));
   }, [profileHydrated, syncMeta]);
 
   useEffect(() => {
     if (!profileHydrated) return;
     if (report) {
-      localStorage.setItem(REPORT_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), report }));
+      const payload = JSON.stringify({ savedAt: Date.now(), report });
+      const saved = writeStorageValue(REPORT_STORAGE_KEY, payload);
+      // If full write fails (e.g., QuotaExceededError), try stripping raw PGNs
+      if (!saved) {
+        const stripped = {
+          ...report,
+          gameSummaries: report.gameSummaries.map(g => ({ ...g, pgn: "" })),
+        };
+        writeStorageValue(REPORT_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), report: stripped }));
+      }
     } else {
-      localStorage.removeItem(REPORT_STORAGE_KEY);
+      removeStorageValue(REPORT_STORAGE_KEY);
     }
   }, [profileHydrated, report]);
+
+  useEffect(() => {
+    if (!report) {
+      if (selectedIssue) setSelectedIssue(null);
+      return;
+    }
+    if (selectedIssue && findMatchingIssue(report, selectedIssue)) return;
+    setSelectedIssue(report.summaries[0]?.examples[0] ?? report.issues[0] ?? null);
+  }, [report]);
 
   useEffect(() => {
     return () => analysisAbortRef.current?.abort();
@@ -222,18 +273,28 @@ export default function App() {
   }, [report, analyzeMovePair]);
 
   useEffect(() => {
-    const syncUser = username.trim().toLowerCase();
-    if (!profileHydrated || !shouldAutoSyncProfile(syncUser, loading)) return;
-    const key = `${syncUser}:${months}:${gameLimit}:${timeClass}`;
+    const syncUser = connectedUsername.trim().toLowerCase();
+    const syncEnabled = Boolean(connectedUsername) && sameChessComUsername(username, connectedUsername);
+    if (!profileHydrated || !shouldAutoSyncProfile(syncUser, loading, syncEnabled) || syncInFlightRef.current) return;
+    if (report) return;
+    const key = `startup:${syncUser}:${months}:${gameLimit}:${timeClass}`;
     if (autoSyncRef.current === key) return;
     autoSyncRef.current = key;
-    runChessComImport({ keepCurrentReport: Boolean(report), silent: Boolean(report) });
-  }, [profileHydrated, username, months, gameLimit, timeClass]);
+    runChessComImport({ usernameOverride: connectedUsername });
+  }, [profileHydrated, username, connectedUsername, months, gameLimit, timeClass, loading, report]);
 
   useEffect(() => {
-    const syncUser = username.trim().toLowerCase();
-    if (!profileHydrated || !report || !syncUser || isPlaceholderUsername(syncUser)) return;
-    const syncLatest = () => runChessComImport({ keepCurrentReport: true, silent: true });
+    const syncUser = connectedUsername.trim().toLowerCase();
+    if (!profileHydrated || !report || !syncUser || isPlaceholderUsername(syncUser) || !sameChessComUsername(username, connectedUsername)) return;
+    const syncLatest = () => {
+      if (syncInFlightRef.current) return;
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+      const now = Date.now();
+      const lastSync = Math.max(lastBackgroundSyncRef.current, syncMetaRef.current.lastSyncedAt ?? 0);
+      if (now - lastSync < BACKGROUND_SYNC_MIN_GAP_MS) return;
+      lastBackgroundSyncRef.current = now;
+      runChessComImport({ keepCurrentReport: true, silent: true, usernameOverride: connectedUsername });
+    };
     const timer = window.setInterval(() => {
       syncLatest();
     }, BACKGROUND_SYNC_INTERVAL_MS);
@@ -250,7 +311,7 @@ export default function App() {
       window.removeEventListener("online", syncLatest);
       document.removeEventListener("visibilitychange", syncOnVisible);
     };
-  }, [profileHydrated, report, username, months, gameLimit, timeClass]);
+  }, [profileHydrated, report, username, connectedUsername, months, gameLimit, timeClass]);
 
   const topPhase = useMemo<Phase>(() => {
     if (!report) return "opening";
@@ -265,10 +326,38 @@ export default function App() {
     return h;
   }, [selectedIssue]);
 
+  const resetLocalProfileData = () => {
+    removeStorageValue(PROFILE_STORAGE_KEY);
+    removeStorageValue(REPORT_STORAGE_KEY);
+    removeStorageValue(SYNC_META_STORAGE_KEY);
+    analysisAbortRef.current?.abort();
+    syncInFlightRef.current = false;
+    autoSyncRef.current = "";
+    lastBackgroundSyncRef.current = 0;
+    setUsername("");
+    setConnectedUsername("");
+    setMonths(DEFAULT_MONTHS);
+    setGameLimit(DEFAULT_GAME_LIMIT);
+    setTimeClass(DEFAULT_TIME_CLASS);
+    setPgnText("");
+    setReport(null);
+    setSelectedIssue(null);
+    setActiveMistakeReviewId("");
+    setSelectedGameId(-1);
+    setQualityFilter("all");
+    setSelectedPatternId("all");
+    setProgress(null);
+    setError("");
+    setLoading(false);
+    setSyncMeta({ status: "idle" });
+    setActiveView("dashboard");
+  };
+
   async function runChessComImport(options: { keepCurrentReport?: boolean; silent?: boolean; usernameOverride?: string } = {}) {
     if (syncInFlightRef.current) {
       if (!options.silent) {
         setSyncMeta({ status: "syncing", source: "chesscom", message: "Sync already running" });
+        setProgress({ label: "Sync already running", done: 0, total: 1 });
       }
       return;
     }
@@ -280,11 +369,12 @@ export default function App() {
     analysisAbortRef.current?.abort();
     const controller = new AbortController();
     analysisAbortRef.current = controller;
+    const currentReport = report;
     try {
       const progressHandler = options.silent ? undefined : setProgress;
-      const syncUsername = options.usernameOverride || username;
-      const currentReport = report;
-      const isLatestRefresh = Boolean(options.keepCurrentReport && currentReport);
+      const syncUsername = (options.usernameOverride || username).trim();
+      const isSameConnectedUser = sameChessComUsername(syncUsername, connectedUsername);
+      const isLatestRefresh = Boolean(options.keepCurrentReport && currentReport && isSameConnectedUser);
       const syncMonths = isLatestRefresh ? Math.min(Math.max(months, LATEST_SYNC_MONTHS), 3) : months;
       const syncLimit = isLatestRefresh ? Math.max(gameLimit, 120) : gameLimit;
       const games = await fetchChessComGames(syncUsername, syncMonths, timeClass, progressHandler, syncLimit);
@@ -305,7 +395,9 @@ export default function App() {
         .slice()
         .sort((a, b) => (a.end_time ?? 0) - (b.end_time ?? 0))
         .slice(-syncLimit);
-      progressHandler?.({ label: `Analyzing ${isLatestRefresh ? "new" : gamesForAnalysis.length} games`, done: 1, total: 1 });
+      const analysisLabel = `Analyzing ${isLatestRefresh ? "new" : gamesForAnalysis.length} games`;
+      progressHandler?.({ label: analysisLabel, done: 1, total: 1 });
+      if (!options.silent) setSyncMeta({ status: "syncing", source: "chesscom", message: analysisLabel });
       const nextReport = isLatestRefresh && currentReport
         ? await analyzeGamesInWorker({
           kind: "pgn",
@@ -313,9 +405,15 @@ export default function App() {
           pgnText: [...currentReport.gameSummaries.map(game => game.pgn), ...gamesForAnalysis.map(game => game.pgn)].join("\n\n"),
         }, controller.signal)
         : await analyzeGamesInWorker({ kind: "chesscom", username: syncUsername, games: gamesForAnalysis }, controller.signal);
+      const syncedUsername = syncUsername;
       setReport(nextReport);
+      if (syncedUsername && !isPlaceholderUsername(syncedUsername)) {
+        setConnectedUsername(syncedUsername);
+        setUsername(syncedUsername);
+        autoSyncRef.current = `${syncedUsername.toLowerCase()}:${months}:${gameLimit}:${timeClass}`;
+      }
       if (options.silent && isLatestRefresh) {
-        setSelectedIssue(current => findMatchingIssue(nextReport, current) ?? current ?? nextReport.summaries[0]?.examples[0] ?? null);
+        setSelectedIssue(current => findMatchingIssue(nextReport, current) ?? nextReport.summaries[0]?.examples[0] ?? null);
       } else {
         setSelectedIssue(nextReport.summaries[0]?.examples[0] ?? null);
         setQualityFilter("all");
@@ -336,7 +434,7 @@ export default function App() {
         const message = err instanceof Error ? err.message : "The import failed.";
         if (!options.silent) setError(message);
         setSyncMeta({ status: "error", source: "chesscom", message });
-        if (!options.keepCurrentReport) setReport(null);
+        if (!options.keepCurrentReport && !currentReport) setReport(null);
       }
     } finally {
       syncInFlightRef.current = false;
@@ -346,20 +444,23 @@ export default function App() {
     }
   }
 
-  async function runChessComConnect() {
+  async function runChessComConnectAndSync() {
     setError("");
     setLoading(true);
-    setProgress({ label: "Connecting Chess.com profile", done: 0, total: 1 });
+    setProgress({ label: "Connecting Chess.com profile", done: 0, total: 2 });
+    setSyncMeta({ status: "syncing", source: "chesscom", message: "Connecting Chess.com profile" });
     try {
-      const profile = await fetchChessComProfile(username);
+      const profile = await fetchChessComProfile(username.trim());
       const canonicalUsername = profile.username || username.trim();
       setUsername(canonicalUsername);
-      setProgress({ label: "Profile connected", done: 1, total: 1 });
-      setProfileOpen(false);
-      setSyncMeta({ status: "idle", source: "chesscom", message: "Profile connected" });
+      setProgress({ label: "Profile connected", done: 1, total: 2 });
+      autoSyncRef.current = `${canonicalUsername.trim().toLowerCase()}:${months}:${gameLimit}:${timeClass}`;
+      setLoading(false);
+      await runChessComImport({ usernameOverride: canonicalUsername });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not connect that Chess.com profile.");
-    } finally {
+      const message = err instanceof Error ? err.message : "Could not connect that Chess.com profile.";
+      setError(message);
+      setSyncMeta({ status: "error", source: "chesscom", message });
       setLoading(false);
       window.setTimeout(() => setProgress(null), 700);
     }
@@ -397,144 +498,137 @@ export default function App() {
     }
   }
 
-  async function runFirstRunConnect() {
-    setError("");
-    setLoading(true);
-    setProgress({ label: "Connecting Chess.com profile", done: 0, total: 1 });
-    try {
-      const profile = await fetchChessComProfile(username);
-      const canonicalUsername = profile.username || username.trim();
-      setUsername(canonicalUsername);
-      setProgress({ label: "Profile connected", done: 1, total: 2 });
-      setLoading(false);
-      await runChessComImport({ usernameOverride: canonicalUsername });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not connect that Chess.com profile.");
-      setSyncMeta({ status: "error", source: "chesscom", message: err instanceof Error ? err.message : "Could not connect that Chess.com profile." });
-      setLoading(false);
-      window.setTimeout(() => setProgress(null), 700);
+  const navigateView = (view: "dashboard" | "games" | "mistakes" | "drill" | "analysis") => {
+    setProfileOpen(false);
+    setMenuOpen(false);
+    if (view === "drill") {
+      setDrillStartInPuzzle(false);
+      setDrillLaunchKey(key => key + 1);
     }
-  }
+    setActiveView(view);
+  };
 
   return (
     <ErrorBoundary>
-    <main className="app-shell">
-      <section className={`workspace view-${activeView}`}>
-        <header className="topbar">
-          <button className="icon-button" onClick={() => setMenuOpen(true)} aria-label="Open app menu"><Menu size={21} /></button>
-          <div className="brand-lockup">
-            <h1>Pattern Coach</h1>
-          </div>
-          <button className={`avatar ${username ? "connected" : ""}`} onClick={() => setProfileOpen(true)} aria-label="Open profile">
-            {username ? username.slice(0, 2).toUpperCase() : <User size={17} />}
-          </button>
-        </header>
-
-        {progress && activeView === "dashboard" && <ImportStatus progress={progress} />}
-
-        {error && <div className="error-banner">{error}</div>}
-
-        {report ? (
-          <>
-            {activeView === "dashboard" && (
-              <Dashboard
-                report={report}
-                topPhase={topPhase}
-                openGame={(gameId) => {
-                  setSelectedGameId(gameId);
-                  setActiveView("games");
-                }}
-                openMistakes={() => setActiveView("mistakes")}
-                openQuality={(quality) => {
-                  setQualityFilter(quality);
-                  setDrillStartInPuzzle(false);
-                  setDrillLaunchKey(key => key + 1);
-                  setActiveView(quality === "good" || quality === "best" ? "games" : "drill");
-                }}
-                trainNow={() => {
-                  setQualityFilter("all");
-                  setSelectedPatternId("all");
-                  setDrillStartInPuzzle(false);
-                  setDrillLaunchKey(key => key + 1);
-                  setActiveView("drill");
-                }}
-                syncMeta={syncMeta}
-              />
-            )}
-            {activeView === "games" && (
-              <GamesView
-                report={report}
-                selectedGameId={selectedGameId}
-                setSelectedGameId={setSelectedGameId}
-                openMove={(review) => {
-                  const issue = report.issues.find(candidate => candidate.fenBefore === review.fenBefore && candidate.san === review.san);
-                  if (issue) setSelectedIssue(issue);
-                  const bucket = qualityBucket(review.quality);
-                  setQualityFilter(bucket);
-                  setActiveView(bucket === "good" || bucket === "best" ? "games" : "drill");
-                }}
-                openAnalysis={openAnalysis}
-              />
-            )}
-            {activeView === "mistakes" && (
-              <MistakeLab
-                report={report}
-                selectedIssue={selectedIssue}
-                setSelectedIssue={setSelectedIssue}
-                selectedPatternId={selectedPatternId}
-                setSelectedPatternId={setSelectedPatternId}
-                selectedReviewId={activeMistakeReviewId}
-                setSelectedReviewId={setActiveMistakeReviewId}
-                startDrill={(quality, patternId = "all", issue) => {
-                  setQualityFilter(quality);
-                  setSelectedPatternId(patternId);
-                  if (issue) setSelectedIssue(issue);
-                  setDrillStartInPuzzle(true);
-                  setDrillLaunchKey(key => key + 1);
-                  setActiveView("drill");
-                }}
-                openAnalysis={openAnalysis}
-              />
-            )}
-            {activeView === "analysis" && analysisStart && (
-              <AnalysisView
-                start={analysisStart}
-                back={() => setActiveView(analysisReturnView)}
-              />
-            )}
-            {activeView === "drill" && (
-              <DrillPanel
-                issues={report.issues}
-                summaries={report.summaries}
-                initialIssue={selectedIssue}
-                qualityFilter={qualityFilter}
-                patternId={selectedPatternId}
-                startInPuzzle={drillStartInPuzzle}
-                launchKey={drillLaunchKey}
-                onQualityFilterChange={setQualityFilter}
-                onPatternChange={setSelectedPatternId}
-                onAnalyze={(fen, flipped, title) => openAnalysis(fen, flipped, title)}
-                returnToSourceOnPuzzleBack={drillStartInPuzzle}
-                onBack={() => setActiveView("mistakes")}
-              />
-            )}
-          </>
-        ) : (
-          <FirstRunLogin
-            username={username}
-            setUsername={setUsername}
-            loading={loading}
+    <main className="app-shell exact-app-host">
+      {report ? (
+          <ExactPatternCoachMobile
+            activeView={activeView}
+            setActiveView={navigateView}
+            analysisReturnView={analysisReturnView}
+            report={report}
+            username={username || connectedUsername}
+            syncMeta={syncMeta}
+            analysisStart={analysisStart}
             openProfile={() => setProfileOpen(true)}
-            connectAndSync={runFirstRunConnect}
-            loadSample={() => { setPgnText(samplePgn); runPgnAnalysis(samplePgn, "Sample"); }}
-            error={error}
-          />
-        )}
+          gamesPanel={
+            <GamesView
+              report={report}
+              selectedGameId={selectedGameId}
+              setSelectedGameId={setSelectedGameId}
+              openMove={(review) => {
+                const issue = report.issues.find(candidate => candidate.fenBefore === review.fenBefore && candidate.san === review.san);
+                if (issue) setSelectedIssue(issue);
+                const bucket = qualityBucket(review.quality);
+                setQualityFilter(bucket);
+                if (bucket === "good" || bucket === "best") {
+                  setActiveView("games");
+                } else {
+                  setActiveMistakeReviewId(review.id);
+                  setActiveView("mistakes");
+                }
+              }}
+              openAnalysis={openAnalysis}
+            />
+          }
+          labPanel={
+            <MistakeLab
+              report={report}
+              selectedIssue={selectedIssue}
+              setSelectedIssue={setSelectedIssue}
+              qualityFilter={qualityFilter}
+              setQualityFilter={setQualityFilter}
+              selectedPatternId={selectedPatternId}
+              setSelectedPatternId={setSelectedPatternId}
+              selectedReviewId={activeMistakeReviewId}
+              setSelectedReviewId={setActiveMistakeReviewId}
+              startDrill={(quality, patternId = "all", issue) => {
+                setQualityFilter(quality);
+                setSelectedPatternId(patternId);
+                if (issue) setSelectedIssue(issue);
+                setDrillStartInPuzzle(true);
+                setDrillLaunchKey(key => key + 1);
+                setActiveView("drill");
+              }}
+              openAnalysis={openAnalysis}
+            />
+          }
+          drillPanel={
+            <DrillPanel
+              issues={report.issues}
+              summaries={report.summaries}
+              initialIssue={selectedIssue}
+              qualityFilter={qualityFilter}
+              patternId={selectedPatternId}
+              startInPuzzle={drillStartInPuzzle}
+              launchKey={drillLaunchKey}
+              onQualityFilterChange={setQualityFilter}
+              onPatternChange={setSelectedPatternId}
+              onAnalyze={(fen, flipped, title) => openAnalysis(fen, flipped, title)}
+              returnToSourceOnPuzzleBack={drillStartInPuzzle}
+              onBack={() => setActiveView("mistakes")}
+            />
+          }
+          analysisPanel={analysisStart ? (
+            <AnalysisView
+              start={analysisStart}
+              back={() => {
+                if (analysisStart.returnMistakeReviewId) {
+                  setActiveMistakeReviewId(analysisStart.returnMistakeReviewId);
+                }
+                setActiveView(analysisReturnView);
+              }}
+            />
+          ) : null}
+          startDrill={(quality = "all", patternId = "all", issue) => {
+            setQualityFilter(quality);
+            setSelectedPatternId(patternId);
+            if (issue) setSelectedIssue(issue);
+            setDrillStartInPuzzle(false);
+            setDrillLaunchKey(key => key + 1);
+            setActiveView("drill");
+          }}
+          openGame={(gameId) => {
+            setSelectedGameId(gameId);
+            setActiveView("games");
+          }}
+          openAnalysis={openAnalysis}
+        />
+      ) : (
+        <ExactMobileImport
+          username={username}
+          setUsername={setUsername}
+          months={months}
+          setMonths={setMonths}
+          gameLimit={gameLimit}
+          setGameLimit={setGameLimit}
+          timeClass={timeClass}
+          setTimeClass={setTimeClass}
+          loading={loading}
+          openProfile={() => setProfileOpen(true)}
+          connectAndSync={runChessComConnectAndSync}
+          loadSample={() => { setPgnText(samplePgn); runPgnAnalysis(samplePgn, "Sample"); }}
+          progress={progress}
+          syncMeta={syncMeta}
+          error={error}
+        />
+      )}
 
         {menuOpen && (
           <AppMenu
             report={report}
             username={username}
+            connectedUsername={connectedUsername}
             syncMeta={syncMeta}
             loading={loading}
             close={() => setMenuOpen(false)}
@@ -547,13 +641,7 @@ export default function App() {
               runChessComImport({ keepCurrentReport: Boolean(report) });
             }}
             clearData={() => {
-              localStorage.removeItem(PROFILE_STORAGE_KEY);
-              localStorage.removeItem(REPORT_STORAGE_KEY);
-              localStorage.removeItem(SYNC_META_STORAGE_KEY);
-              setUsername("");
-              setReport(null);
-              setSyncMeta({ status: "idle" });
-              setSelectedIssue(null);
+              resetLocalProfileData();
               setMenuOpen(false);
             }}
           />
@@ -563,6 +651,7 @@ export default function App() {
           <ProfileSheet
             username={username}
             setUsername={setUsername}
+            connectedUsername={connectedUsername}
             months={months}
             setMonths={setMonths}
             gameLimit={gameLimit}
@@ -572,38 +661,20 @@ export default function App() {
             pgnText={pgnText}
             setPgnText={setPgnText}
             loading={loading}
-            runChessComConnect={runChessComConnect}
+            progress={progress}
+            error={error}
+            syncMeta={syncMeta}
+            runChessComConnect={runChessComConnectAndSync}
             runChessComImport={() => runChessComImport()}
             runPgnAnalysis={runPgnAnalysis}
             loadSample={() => { setPgnText(samplePgn); runPgnAnalysis(samplePgn, "Sample"); }}
             forgetProfile={() => {
-              localStorage.removeItem(PROFILE_STORAGE_KEY);
-              localStorage.removeItem(REPORT_STORAGE_KEY);
-              localStorage.removeItem(SYNC_META_STORAGE_KEY);
-              setUsername("");
-              setReport(null);
-              setSyncMeta({ status: "idle" });
+              resetLocalProfileData();
               setProfileOpen(false);
             }}
             close={() => setProfileOpen(false)}
           />
         )}
-
-        <nav className={`bottom-nav view-${activeView}`}>
-          <button className={activeView === "dashboard" ? "active" : ""} onClick={() => setActiveView("dashboard")}><LayoutGrid size={20} /><span>Dashboard</span></button>
-          <button className={report && activeView === "games" ? "active" : ""} onClick={() => report ? setActiveView("games") : setProfileOpen(true)}><BookOpen size={20} /><span>Games</span></button>
-          <button className={report && activeView === "mistakes" ? "active" : ""} onClick={() => report ? setActiveView("mistakes") : setProfileOpen(true)}><Skull size={20} /><span>Mistake Lab</span></button>
-          <button className={report && activeView === "drill" ? "active" : ""} onClick={() => {
-            if (!report) {
-              setProfileOpen(true);
-              return;
-            }
-            setDrillStartInPuzzle(false);
-            setDrillLaunchKey(key => key + 1);
-            setActiveView("drill");
-          }}><Sword size={20} /><span>Drill Mode</span></button>
-        </nav>
-      </section>
     </main>
     </ErrorBoundary>
   );
@@ -714,7 +785,7 @@ function FirstRunLogin({ username, setUsername, loading, openProfile, connectAnd
           <input
             value={username}
             onChange={event => setUsername(event.target.value)}
-            placeholder="hikaru"
+            placeholder="your_username"
             autoCapitalize="none"
             autoComplete="username"
           />
@@ -751,9 +822,10 @@ function FirstRunLogin({ username, setUsername, loading, openProfile, connectAnd
   );
 }
 
-function AppMenu({ report, username, syncMeta, loading, close, openProfile, syncGames, clearData }: {
+function AppMenu({ report, username, connectedUsername, syncMeta, loading, close, openProfile, syncGames, clearData }: {
   report: AnalysisReport | null;
   username: string;
+  connectedUsername: string;
   syncMeta: SyncMeta;
   loading: boolean;
   close: () => void;
@@ -761,9 +833,11 @@ function AppMenu({ report, username, syncMeta, loading, close, openProfile, sync
   syncGames: () => void;
   clearData: () => void;
 }) {
+  const statusName = username.trim() || connectedUsername;
+  const draftIsConnected = sameChessComUsername(statusName, connectedUsername);
   return (
-    <div className="profile-overlay menu-overlay" role="dialog" aria-modal="true" aria-label="App menu">
-      <div className="profile-sheet app-menu-sheet">
+    <div className="profile-overlay menu-overlay" role="dialog" aria-modal="true" aria-label="App menu" onClick={close}>
+      <div className="profile-sheet app-menu-sheet" onClick={event => event.stopPropagation()}>
         <div className="sheet-header">
           <div>
             <span className="eyebrow">Menu</span>
@@ -772,10 +846,10 @@ function AppMenu({ report, username, syncMeta, loading, close, openProfile, sync
           <button className="icon-button sheet-close" onClick={close} aria-label="Close menu"><X size={18} /></button>
         </div>
         <div className="profile-status-card">
-          <div className={`profile-avatar-large ${username ? "connected" : ""}`}>{username ? username.slice(0, 2).toUpperCase() : <User size={22} />}</div>
+          <div className={`profile-avatar-large ${draftIsConnected ? "connected" : ""}`}>{statusName ? statusName.slice(0, 2).toUpperCase() : <User size={22} />}</div>
           <div>
-            <strong>{username || "No Chess.com username"}</strong>
-            <span>{syncMeta.lastSyncedAt ? `Last synced ${new Date(syncMeta.lastSyncedAt).toLocaleString()}` : syncMeta.message || "Connect to keep games updated."}</span>
+            <strong>{statusName || "No Chess.com username"}</strong>
+            <span>{draftIsConnected && syncMeta.lastSyncedAt ? `Last synced ${new Date(syncMeta.lastSyncedAt).toLocaleString()}` : draftIsConnected ? friendlySyncMessage(syncMeta.message) || "Public game sync enabled." : connectedUsername ? `Currently synced as ${connectedUsername}. Connect to switch.` : "Connect to keep games updated."}</span>
           </div>
         </div>
         <div className="menu-action-list">
@@ -791,9 +865,10 @@ function AppMenu({ report, username, syncMeta, loading, close, openProfile, sync
   );
 }
 
-function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, setGameLimit, timeClass, setTimeClass, pgnText, setPgnText, loading, runChessComConnect, runChessComImport, runPgnAnalysis, loadSample, forgetProfile, close }: {
+function ProfileSheet({ username, setUsername, connectedUsername, months, setMonths, gameLimit, setGameLimit, timeClass, setTimeClass, pgnText, setPgnText, loading, progress, error, syncMeta, runChessComConnect, runChessComImport, runPgnAnalysis, loadSample, forgetProfile, close }: {
   username: string;
   setUsername: (value: string) => void;
+  connectedUsername: string;
   months: number;
   setMonths: (value: number) => void;
   gameLimit: number;
@@ -803,6 +878,9 @@ function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, set
   pgnText: string;
   setPgnText: (value: string) => void;
   loading: boolean;
+  progress: ImportProgress | null;
+  error: string;
+  syncMeta: SyncMeta;
   runChessComConnect: () => void;
   runChessComImport: () => void;
   runPgnAnalysis: (text?: string, usernameOverride?: string) => void;
@@ -810,9 +888,14 @@ function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, set
   forgetProfile: () => void;
   close: () => void;
 }) {
+  const statusName = username.trim() || connectedUsername;
+  const draftIsConnected = sameChessComUsername(statusName, connectedUsername);
+  const profileSyncStatus = friendlySyncMessage(progress?.label || syncMeta.message) || "";
+  const isAnalyzing = Boolean(progress?.label.toLowerCase().startsWith("analyzing"));
+  const profileSyncPercent = progress?.total && !isAnalyzing ? Math.round((progress.done / progress.total) * 100) : null;
   return (
-    <div className="profile-overlay" role="dialog" aria-modal="true">
-      <div className="profile-sheet">
+    <div className="profile-overlay" role="dialog" aria-modal="true" onClick={close}>
+      <div className="profile-sheet" onClick={event => event.stopPropagation()}>
         <div className="sheet-header">
           <div>
             <span className="eyebrow">Profile</span>
@@ -822,29 +905,57 @@ function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, set
         </div>
 
         <div className="profile-status-card">
-          <div className={`profile-avatar-large ${username ? "connected" : ""}`}>{username ? username.slice(0, 2).toUpperCase() : <User size={22} />}</div>
+          <div className={`profile-avatar-large ${draftIsConnected ? "connected" : ""}`}>{statusName ? statusName.slice(0, 2).toUpperCase() : <User size={22} />}</div>
           <div>
-            <strong>{username || "No profile connected"}</strong>
-            <span>{username ? "Public game sync enabled" : "Enter a Chess.com username to start."}</span>
+            <strong>{statusName || "No profile connected"}</strong>
+            <span>{draftIsConnected ? "Public game sync enabled" : username ? "Connect to enable game sync." : "Enter a Chess.com username to start."}</span>
           </div>
         </div>
 
         <section className="profile-form">
           <label>
             <span>Chess.com username</span>
-            <input value={username} onChange={event => setUsername(event.target.value)} placeholder="hikaru" />
+            <input
+              value={username}
+              onChange={event => setUsername(event.target.value)}
+              placeholder="your_username"
+              autoCapitalize="none"
+              autoComplete="username"
+              autoCorrect="off"
+              spellCheck={false}
+            />
           </label>
           <button className="primary-button profile-sync" onClick={runChessComConnect} disabled={loading || !username.trim()}>
-            {loading ? <LoaderCircle className="spin" size={16} /> : <Link2 size={16} />} Connect instantly
+            {loading ? <LoaderCircle className="spin" size={16} /> : <Link2 size={16} />} Connect and sync games
           </button>
+          {(loading || profileSyncStatus || error) && (
+            <div className={`profile-sync-status ${error ? "error" : syncMeta.status === "error" ? "error" : ""}`} role="status">
+              <strong>{error || profileSyncStatus || "Ready"}</strong>
+              {loading && profileSyncPercent !== null && <span>{profileSyncPercent}% complete</span>}
+              {loading && isAnalyzing && <span>Analyzing positions...</span>}
+              {loading && !isAnalyzing && profileSyncPercent === null && <span>Working...</span>}
+            </div>
+          )}
           <div className="profile-grid">
             <label>
               <span>Months</span>
-              <input type="number" min={1} max={240} value={months} onChange={event => setMonths(Number(event.target.value))} />
+              <NumericSettingInput
+                ariaLabel="Months"
+                value={months}
+                min={1}
+                max={240}
+                onValueChange={setMonths}
+              />
             </label>
             <label>
               <span>Game cap</span>
-              <input type="number" min={25} max={50000} value={gameLimit} onChange={event => setGameLimit(Number(event.target.value))} />
+              <NumericSettingInput
+                ariaLabel="Game cap"
+                value={gameLimit}
+                min={1}
+                max={50000}
+                onValueChange={setGameLimit}
+              />
             </label>
           </div>
           <label>
@@ -890,6 +1001,50 @@ function ProfileSheet({ username, setUsername, months, setMonths, gameLimit, set
         </details>
       </div>
     </div>
+  );
+}
+
+function NumericSettingInput({ ariaLabel, value, min, max, onValueChange }: {
+  ariaLabel: string;
+  value: number;
+  min: number;
+  max: number;
+  onValueChange: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = (nextDraft = draft) => {
+    const parsed = Number.parseInt(nextDraft, 10);
+    const nextValue = Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : value;
+    setDraft(String(nextValue));
+    if (nextValue !== value) onValueChange(nextValue);
+  };
+
+  return (
+    <input
+      aria-label={ariaLabel}
+      inputMode="numeric"
+      pattern="[0-9]*"
+      value={draft}
+      onChange={event => {
+        const nextDraft = event.target.value.replace(/[^\d]/g, "");
+        setDraft(nextDraft);
+        if (nextDraft) {
+          const parsed = Number.parseInt(nextDraft, 10);
+          if (Number.isFinite(parsed)) onValueChange(Math.min(max, Math.max(min, parsed)));
+        }
+      }}
+      onBlur={() => commit()}
+      onKeyDown={event => {
+        if (event.key === "Enter") {
+          event.currentTarget.blur();
+        }
+      }}
+    />
   );
 }
 
@@ -1035,10 +1190,12 @@ function QualityReviewCard({ icon, label, value, tone, onClick }: {
   );
 }
 
-function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId, setSelectedPatternId, selectedReviewId, setSelectedReviewId, startDrill, openAnalysis }: {
+function MistakeLab({ report, selectedIssue, setSelectedIssue, qualityFilter, setQualityFilter, selectedPatternId, setSelectedPatternId, selectedReviewId, setSelectedReviewId, startDrill, openAnalysis }: {
   report: AnalysisReport;
   selectedIssue: MoveIssue | null;
   setSelectedIssue: (i: MoveIssue) => void;
+  qualityFilter: MoveReviewQuality | "all";
+  setQualityFilter: (quality: MoveReviewQuality | "all") => void;
   selectedPatternId: string;
   setSelectedPatternId: (id: string) => void;
   selectedReviewId: string;
@@ -1046,10 +1203,13 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
   startDrill: (quality: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => void;
 }) {
-  const [qualityFilter, setQualityFilter] = useState<TrainableReviewBucket | "all">("all");
   const [timeFilter, setTimeFilter] = useState<string>("all");
   const [sortMode, setSortMode] = useState<"latest" | "severity">("latest");
   const [visibleLimit, setVisibleLimit] = useState(80);
+  const effectiveQualityFilter: TrainableReviewBucket | "all" =
+    qualityFilter === "all" ? "all"
+      : isTrainableQuality(qualityFilter) ? (qualityFilter as TrainableReviewBucket)
+      : "all";
   const filterCounts = useMemo(() => {
     const base = report.moveReviews
       .filter(review => timeFilter === "all" || review.timeClass === timeFilter)
@@ -1058,21 +1218,22 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
       .filter(review => review.issueIds.length);
     return {
       all: base.length,
-      blunder: base.filter(review => qualityBucket(review.quality) === "blunder").length,
-      miss: base.filter(review => qualityBucket(review.quality) === "miss").length,
-      mistake: base.filter(review => qualityBucket(review.quality) === "mistake").length,
+      blunder: base.filter(review => review.quality === "blunder").length,
+      miss: base.filter(review => review.quality === "miss").length,
+      mistake: base.filter(review => review.quality === "mistake").length,
+      inaccuracy: base.filter(review => review.quality === "inaccuracy").length,
     };
   }, [report.moveReviews, timeFilter, selectedPatternId]);
   const allReviews = useMemo(() => report.moveReviews
       .filter(review => timeFilter === "all" || review.timeClass === timeFilter)
       .filter(review => selectedPatternId === "all" || review.issueIds.includes(selectedPatternId as any))
       .filter(review => isTrainableQuality(review.quality))
-      .filter(review => qualityFilter === "all" || qualityBucket(review.quality) === qualityFilter)
+      .filter(review => effectiveQualityFilter === "all" || qualityBucket(review.quality) === effectiveQualityFilter)
       .filter(review => review.issueIds.length)
       .sort((a, b) => sortMode === "latest"
         ? (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId) || (b.engineEvalLoss ?? b.severity) - (a.engineEvalLoss ?? a.severity)
         : (b.engineEvalLoss ?? b.severity) - (a.engineEvalLoss ?? a.severity) || (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId)),
-    [report.moveReviews, timeFilter, selectedPatternId, qualityFilter, sortMode]
+    [report.moveReviews, timeFilter, selectedPatternId, effectiveQualityFilter, sortMode]
   );
   const reviews = useMemo(() => allReviews.slice(0, visibleLimit), [allReviews, visibleLimit]);
   const issueForReview = (review: MoveReview): MoveIssue | null => {
@@ -1105,25 +1266,33 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
       engineReviewed: review.engineReviewed,
     };
   };
-  const selectedReview = reviews.find(review => review.id === selectedReviewId);
+  const selectedReview = allReviews.find(review => review.id === selectedReviewId);
   const selectedReviewIssue = selectedReview ? issueForReview(selectedReview) : null;
-  const selectedIndex = selectedReview ? reviews.findIndex(review => review.id === selectedReview.id) : -1;
+  const selectedIndex = selectedReview ? allReviews.findIndex(review => review.id === selectedReview.id) : -1;
 
   useEffect(() => {
-    if (!selectedReviewId || !reviews.some(review => review.id === selectedReviewId)) {
+    if (!selectedReviewId || !allReviews.some(review => review.id === selectedReviewId)) {
       setSelectedReviewId("");
     }
-  }, [reviews, selectedReviewId]);
+  }, [allReviews, selectedReviewId]);
 
   useEffect(() => {
-    if (qualityFilter !== "all" && filterCounts[qualityFilter] === 0) {
+    if (!selectedReviewId) return;
+    const selectedVisibleIndex = allReviews.findIndex(review => review.id === selectedReviewId);
+    if (selectedVisibleIndex >= visibleLimit) {
+      setVisibleLimit(Math.min(allReviews.length, selectedVisibleIndex + 1));
+    }
+  }, [allReviews, selectedReviewId, visibleLimit]);
+
+  useEffect(() => {
+    if (effectiveQualityFilter !== "all" && filterCounts[effectiveQualityFilter] === 0) {
       setQualityFilter("all");
     }
-  }, [filterCounts, qualityFilter]);
+  }, [filterCounts, effectiveQualityFilter, setQualityFilter]);
 
   useEffect(() => {
     setVisibleLimit(80);
-  }, [qualityFilter, selectedPatternId, sortMode, timeFilter]);
+  }, [effectiveQualityFilter, selectedPatternId, sortMode, timeFilter]);
 
   const selectedGame = selectedReview ? report.gameSummaries.find(game => game.id === selectedReview.gameId) : undefined;
 
@@ -1134,16 +1303,16 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
           <span className="eyebrow">Mistake Lab</span>
           <h2>{allReviews.length} {allReviews.length === 1 ? "mistake" : "mistakes"}</h2>
         </div>
-        <button className="primary-button" onClick={() => startDrill(qualityFilter, selectedPatternId)} disabled={!reviews.length}>
+        <button className="primary-button" onClick={() => startDrill(effectiveQualityFilter, selectedPatternId)} disabled={!reviews.length}>
           <Dumbbell size={16} /> Drill shown
         </button>
       </div>
 
       <div className="lab-filter-tabs">
-        {(["all", "blunder", "miss", "mistake"] as Array<TrainableReviewBucket | "all">).map(quality => (
+        {(["all", "blunder", "miss", "mistake", "inaccuracy"] as Array<TrainableReviewBucket | "all">).map(quality => (
           <button
             key={quality}
-            className={qualityFilter === quality ? "active" : ""}
+            className={effectiveQualityFilter === quality ? "active" : ""}
             onClick={() => setQualityFilter(quality)}
             disabled={quality !== "all" && filterCounts[quality] === 0}
           >
@@ -1231,19 +1400,22 @@ function MistakeLab({ report, selectedIssue, setSelectedIssue, selectedPatternId
           issue={selectedReviewIssue}
           game={selectedGame}
           close={() => setSelectedReviewId("")}
-          next={reviews[selectedIndex + 1] ? () => {
-            const nextReview = reviews[selectedIndex + 1];
+          next={allReviews[selectedIndex + 1] ? () => {
+            const nextReview = allReviews[selectedIndex + 1];
             const nextIssue = issueForReview(nextReview);
             if (nextIssue) setSelectedIssue(nextIssue);
             setSelectedReviewId(nextReview.id);
           } : undefined}
-          prev={reviews[selectedIndex - 1] ? () => {
-            const previousReview = reviews[selectedIndex - 1];
+          prev={allReviews[selectedIndex - 1] ? () => {
+            const previousReview = allReviews[selectedIndex - 1];
             const previousIssue = issueForReview(previousReview);
             if (previousIssue) setSelectedIssue(previousIssue);
             setSelectedReviewId(previousReview.id);
           } : undefined}
-          train={() => startDrill(qualityBucket(selectedReview.quality), selectedReviewIssue.id, selectedReviewIssue)}
+          train={() => {
+            setSelectedReviewId("");
+            startDrill(qualityBucket(selectedReview.quality), selectedReviewIssue.id, selectedReviewIssue);
+          }}
           openAnalysis={openAnalysis}
         />
       )}
@@ -1262,6 +1434,7 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: Omit<AnalysisStart, "fen" | "flipped" | "title">) => void;
 }) {
   const sheetRef = useRef<HTMLDivElement>(null);
+  const sheetDragStartYRef = useRef<number | null>(null);
   const betterMove = review.engineBestMove || review.engineLines?.[0]?.bestMove || "";
   const bucket = qualityBucket(review.quality);
   const betterLabel = formatEngineUci(betterMove) || "Best line";
@@ -1270,6 +1443,7 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
   const [lineIndex, setLineIndex] = useState(0);
   const [consequenceMoves, setConsequenceMoves] = useState<string[]>([]);
   const [consequenceEval, setConsequenceEval] = useState<EngineEvaluation | null>(null);
+  const [sheetDragY, setSheetDragY] = useState(0);
   const betterMoves = useMemo(() => {
     const source = review.engineLines?.[0]?.pv || betterMove;
     return source.split(" ").filter(Boolean).slice(0, 8);
@@ -1277,15 +1451,15 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
 
   useEffect(() => {
     if (comparison !== "consequence") return;
-    let cancelled = false;
+    const controller = new AbortController();
     setConsequenceMoves([]);
     setConsequenceEval(null);
-    evaluatePosition(review.fenAfter, ENGINE_DEPTH).then(result => {
-      if (cancelled) return;
+    evaluatePosition(review.fenAfter, ENGINE_DEPTH, { signal: controller.signal }).then(result => {
+      if (controller.signal.aborted) return;
       setConsequenceEval(result);
       setConsequenceMoves((result.pv || result.bestMove || "").split(" ").filter(Boolean).slice(0, 8));
     });
-    return () => { cancelled = true; };
+    return () => controller.abort();
   }, [comparison, evaluatePosition, review.fenAfter]);
 
   useEffect(() => {
@@ -1319,11 +1493,35 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
       ? review.engineEvalBefore
       : consequenceEval?.evalCp ?? review.engineEvalAfter;
   const boardEvalMate = comparison === "consequence" ? consequenceEval?.mate : undefined;
-  const boardFen = activeStep?.fen || review.fenBefore;
-  const boardLastMove = activeStep?.lastMove;
+  const boardFen = activeStep?.fen || (comparison === "consequence" ? review.fenAfter : review.fenBefore);
+  const boardLastMove = activeStep?.lastMove || (comparison === "consequence" ? { from: review.uci.slice(0, 2), to: review.uci.slice(2, 4) } : undefined);
+  const startSheetDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!(event.target as HTMLElement).closest(".sheet-grabber")) return;
+    sheetDragStartYRef.current = event.clientY;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const updateSheetDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (sheetDragStartYRef.current === null) return;
+    setSheetDragY(Math.max(0, event.clientY - sheetDragStartYRef.current));
+  };
+  const finishSheetDrag = () => {
+    if (sheetDragStartYRef.current === null) return;
+    const shouldClose = sheetDragY > 80;
+    sheetDragStartYRef.current = null;
+    setSheetDragY(0);
+    if (shouldClose) close();
+  };
   return (
     <div className="mistake-sheet-backdrop" role="dialog" aria-modal="true" aria-label="Mistake details">
-      <div className="mistake-sheet" ref={sheetRef}>
+      <div
+        className="mistake-sheet"
+        ref={sheetRef}
+        onPointerDown={startSheetDrag}
+        onPointerMove={updateSheetDrag}
+        onPointerUp={finishSheetDrag}
+        onPointerCancel={() => { sheetDragStartYRef.current = null; setSheetDragY(0); }}
+        style={{ transform: sheetDragY ? `translateY(${sheetDragY}px)` : undefined }}
+      >
         <button className="sheet-grabber" onClick={close} aria-label="Close mistake details" />
         <div className="sheet-title-row">
           <div>
@@ -1344,7 +1542,7 @@ function MistakeBottomSheet({ review, issue, game, close, next, prev, train, ope
             mate={boardEvalMate}
             lastMove={boardLastMove}
             arrows={mistakeArrows}
-            onAnalyze={() => openAnalysis(boardFen, review.color === "black", `${review.san}`, { gamePgn: game?.pgn })}
+            onAnalyze={() => openAnalysis(boardFen, review.color === "black", `${review.san}`, { gamePgn: game?.pgn, returnMistakeReviewId: review.id })}
             size={760}
           />
           <div className="sheet-move-compare">
@@ -1444,7 +1642,7 @@ function buildMoveLine(fen: string, moves: string[]): MoveLineStep[] {
       played = board.move({
         from: moveText.slice(0, 2),
         to: moveText.slice(2, 4),
-        promotion: moveText[4] || "q",
+        promotion: moveText[4],
       });
     } catch {
       break;
@@ -1485,7 +1683,7 @@ function MistakeDetail({ review, issue, game, back, next, prev, train, openAnaly
   const [storyStep, setStoryStep] = useState<"position" | "played" | "better">("position");
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     document.querySelector(".workspace")?.scrollTo({ top: 0, behavior: "auto" });
     setBestMove("");
     setEngineLine("");
@@ -1494,22 +1692,22 @@ function MistakeDetail({ review, issue, game, back, next, prev, train, openAnaly
     setBoardFen(review.fenBefore);
     setLastMove(undefined);
     setStoryStep("position");
-    evaluatePosition(review.fenBefore, ENGINE_DEPTH).then(result => {
-      if (cancelled) return;
+    evaluatePosition(review.fenBefore, ENGINE_DEPTH, { signal: controller.signal }).then(result => {
+      if (controller.signal.aborted) return;
       setSourceEval(result);
       setBestMove(result.bestMove || review.engineBestMove || "");
       setEngineLine(result.pv);
     });
-    return () => { cancelled = true; };
+    return () => controller.abort();
   }, [review.id, review.fenBefore, review.engineBestMove, evaluatePosition]);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     setBoardEval(null);
-    evaluatePosition(boardFen, ENGINE_DEPTH).then(result => {
-      if (!cancelled) setBoardEval(result);
+    evaluatePosition(boardFen, ENGINE_DEPTH, { signal: controller.signal }).then(result => {
+      if (!controller.signal.aborted) setBoardEval(result);
     });
-    return () => { cancelled = true; };
+    return () => controller.abort();
   }, [boardFen, evaluatePosition]);
 
   const showOriginal = () => {
@@ -1527,7 +1725,7 @@ function MistakeDetail({ review, issue, game, back, next, prev, train, openAnaly
   const showBetterMove = () => {
     const move = sourceBestMove;
     const board = new Chess(review.fenBefore);
-    const played = move && board.move({ from: move.slice(0, 2), to: move.slice(2, 4), promotion: move[4] || "q" });
+    const played = move && board.move({ from: move.slice(0, 2), to: move.slice(2, 4), promotion: move[4] });
     setBoardFen(played ? board.fen() : review.fenBefore);
     setLastMove(move ? { from: move.slice(0, 2), to: move.slice(2, 4) } : undefined);
     setStoryStep("better");
@@ -1618,11 +1816,14 @@ function AnalysisView({ start, back }: {
   const [fen, setFen] = useState(start.fen);
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | undefined>();
   const [engineEval, setEngineEval] = useState<EngineEvaluation | null>(null);
-  const [moveLog, setMoveLog] = useState<string[]>([]);
   const [history, setHistory] = useState<AnalysisHistoryEntry[]>(() => buildAnalysisHistory(start));
   const [historyIndex, setHistoryIndex] = useState(0);
   const [boardFlipped, setBoardFlipped] = useState(Boolean(start.flipped));
   const { ready, error, evaluatePosition } = useStockfish();
+  const moveLog = useMemo(
+    () => history.slice(1, historyIndex + 1).map(item => item.san).filter(Boolean) as string[],
+    [history, historyIndex],
+  );
 
   useEffect(() => {
     const nextHistory = buildAnalysisHistory(start);
@@ -1630,7 +1831,6 @@ function AnalysisView({ start, back }: {
     const entry = nextHistory[nextIndex] || { fen: start.fen };
     setFen(entry.fen);
     setLastMove(entry.lastMove);
-    setMoveLog(nextHistory.slice(1, nextIndex + 1).map(item => item.san).filter(Boolean) as string[]);
     setHistory(nextHistory);
     setHistoryIndex(nextIndex);
     setEngineEval(null);
@@ -1638,17 +1838,17 @@ function AnalysisView({ start, back }: {
   }, [start]);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     setEngineEval(null);
-    evaluatePosition(fen, ENGINE_DEPTH).then(result => {
-      if (!cancelled) setEngineEval(result);
+    evaluatePosition(fen, ENGINE_DEPTH, { signal: controller.signal }).then(result => {
+      if (!controller.signal.aborted) setEngineEval(result);
     });
-    return () => { cancelled = true; };
+    return () => controller.abort();
   }, [fen, evaluatePosition]);
 
   const playMove = async (from: string, to: string, promotion?: string) => {
     const board = new Chess(fen);
-    const move = board.move({ from, to, promotion: promotion || "q" });
+    const move = board.move({ from, to, promotion });
     if (!move) return;
     setLastMove({ from, to });
     setFen(board.fen());
@@ -1656,11 +1856,8 @@ function AnalysisView({ start, back }: {
     setHistory(current => {
       const next = current.slice(0, historyIndex + 1).concat(entry);
       setHistoryIndex(next.length - 1);
-      setMoveLog(next.slice(1).map(item => item.san).filter(Boolean) as string[]);
       return next;
     });
-    const result = await evaluatePosition(board.fen(), ENGINE_DEPTH);
-    setEngineEval(result);
   };
 
   const jumpToHistory = (nextIndex: number) => {
@@ -1669,14 +1866,12 @@ function AnalysisView({ start, back }: {
     setHistoryIndex(clamped);
     setFen(entry.fen);
     setLastMove(entry.lastMove);
-    setMoveLog(history.slice(1, clamped + 1).map(item => item.san).filter(Boolean) as string[]);
   };
 
   const resetAnalysis = () => {
     const nextHistory = buildAnalysisHistory(start);
     const entry = nextHistory[0] || { fen: start.fen };
     setFen(entry.fen);
-    setMoveLog([]);
     setLastMove(entry.lastMove);
     setHistory(nextHistory);
     setHistoryIndex(0);
@@ -1779,7 +1974,9 @@ function EngineSuggestions({ evaluation, ready, error }: { evaluation: EngineEva
 function formatPrincipalVariation(pv?: string, fallback?: string) {
   const moves = (pv || fallback || "").split(" ").filter(Boolean).slice(0, 5);
   if (!moves.length) return "...";
-  return moves.map((move, index) => `${index === 0 ? "1. " : ""}${formatEngineUci(move)}`).join(" ");
+  return moves
+    .map((move, index) => `${Math.floor(index / 2) + 1}${index % 2 === 0 ? "." : "..."} ${formatEngineUci(move)}`)
+    .join(" ");
 }
 
 function evalToWhitePercent(evalCp?: number, mate?: number) {
@@ -1835,7 +2032,7 @@ function buildAnalysisHistory(start: AnalysisStart): AnalysisHistoryEntry[] {
     const replay = new Chess();
     const entries: AnalysisHistoryEntry[] = [{ fen: replay.fen() }];
     for (const move of moves) {
-      const played = replay.move({ from: move.from, to: move.to, promotion: move.promotion || "q" });
+      const played = replay.move({ from: move.from, to: move.to, promotion: move.promotion });
       if (!played) break;
       entries.push({
         fen: replay.fen(),
@@ -1868,11 +2065,11 @@ function qualityLabel(quality: MoveReviewQuality) {
 }
 
 function qualityBucket(quality: MoveReviewQuality): ReviewBucket {
-  return quality === "inaccuracy" ? "mistake" : quality;
+  return quality as ReviewBucket;
 }
 
 function isTrainableQuality(quality: MoveReviewQuality) {
-  return qualityBucket(quality) === "blunder" || qualityBucket(quality) === "miss" || qualityBucket(quality) === "mistake";
+  return quality === "blunder" || quality === "miss" || quality === "mistake" || quality === "inaccuracy";
 }
 
 function reviewLossCp(review: MoveReview) {
@@ -1891,6 +2088,7 @@ function formatReviewSwing(review: MoveReview) {
 
 function formatEngineEvalLoss(lossCp: number) {
   if (lossCp <= 0) return "0.0";
+  if (lossCp >= MATE_CP_THRESHOLD) return "-M";
   const pawns = Math.max(0.1, Math.abs(lossCp) / 100);
   return `-${pawns.toFixed(pawns >= 10 ? 0 : 1)}`;
 }
@@ -1942,7 +2140,7 @@ function refineReviewWithEngine(
     ...review,
     quality: nextQuality,
     severity: loss > 250 ? 9 : loss > 120 ? 6 : loss > 50 ? 3 : Math.min(review.severity, 1),
-    issueIds: isEngineMistake && !review.issueIds.length ? ["twoMoveBlindspot" as any] : review.issueIds,
+    issueIds: isEngineMistake && !review.issueIds.length ? ["engineMistake"] : review.issueIds,
     title: isEngineMistake && !review.issueIds.length ? "Engine mistake" : review.title,
     explanation: isEngineMistake
       ? `${formatEngineUci(engine.bestMove) || "The engine move"} was preferred. Eval swing ${formatEngineEvalLoss(loss)}.`
@@ -1954,7 +2152,7 @@ function refineReviewWithEngine(
     engineDepth: engine.depth,
     engineConfidence: engine.confidence,
     engineLines: engine.multipv,
-      engineReviewed: true,
+    engineReviewed: true,
   };
 }
 
@@ -1964,13 +2162,15 @@ function addEngineIssues(existingIssues: MoveIssue[], updates: Map<string, MoveR
     if (!isTrainableQuality(review.quality)) continue;
     if (issues.some(issue => issue.fenBefore === review.fenBefore && issue.san === review.san)) continue;
     issues.push({
-      id: "twoMoveBlindspot",
+      id: review.issueIds[0] ?? "engineMistake",
       phase: review.phase,
       quality: review.quality,
       severity: review.severity,
       title: review.title || "Engine mistake",
       explanation: review.explanation,
-      advice: "Compare your move with the engine line, then drill the same pattern until the candidate move is automatic.",
+      advice: review.issueIds[0]
+        ? "Compare your move with the engine line, then drill the same pattern until the candidate move is automatic."
+        : "Use the engine line as a signal, then find the concrete tactic or positional reason behind the better move.",
       moveNumber: review.moveNumber,
       san: review.san,
       uci: review.uci,
@@ -2182,17 +2382,7 @@ function buildGameTimeline(game: GameSummary, reviews: MoveReview[]): GameTimeli
   try {
     source.loadPgn(game.pgn, { strict: false });
   } catch {
-    return reviews.map((review, index) => ({
-      ply: index + 1,
-      moveNumber: review.moveNumber,
-      san: review.san,
-      uci: review.uci,
-      color: review.color === "white" ? "w" : "b",
-      fenBefore: review.fenBefore,
-      fenAfter: review.fenAfter,
-      lastMove: { from: review.uci.slice(0, 2), to: review.uci.slice(2, 4) },
-      review,
-    }));
+    return [];
   }
 
   const replay = new Chess();
@@ -2201,7 +2391,7 @@ function buildGameTimeline(game: GameSummary, reviews: MoveReview[]): GameTimeli
     const fenBefore = replay.fen();
     const uci = `${move.from}${move.to}${move.promotion || ""}`;
     const review = reviews.find(item => item.fenBefore === fenBefore && item.uci === uci);
-    const played = replay.move({ from: move.from, to: move.to, promotion: move.promotion || "q" });
+    const played = replay.move({ from: move.from, to: move.to, promotion: move.promotion });
     if (!played) return [];
     return [{
       ply: index + 1,

@@ -6,8 +6,8 @@ import { openingVerdictForMove } from "../chess/openingBook";
 import { classifyMoveQuality, normalizeSearchEval, scoreForColor } from "../engine/EngineService";
 
 describe("analysis profile", () => {
-  it("uses available Chess.com ratings for peak rating", () => {
-    const report = analyzeChessComGames("Tester", [{
+  it("uses available Chess.com ratings for peak rating", async () => {
+    const report = await analyzeChessComGames("Tester", [{
       url: "https://example.test/game/1",
       pgn: `[Event "Rated game"]
 [Site "Chess.com"]
@@ -26,8 +26,8 @@ describe("analysis profile", () => {
     expect(report.skillProfile.estimatedRating).toBeGreaterThan(1400);
   });
 
-  it("extracts PGN Elo tags when present", () => {
-    const report = analyzePgnText("Tester", `[Event "PGN game"]
+  it("extracts PGN Elo tags when present", async () => {
+    const report = await analyzePgnText("Tester", `[Event "PGN game"]
 [Site "Local"]
 [White "Tester"]
 [Black "Opponent"]
