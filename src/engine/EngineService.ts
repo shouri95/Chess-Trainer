@@ -39,6 +39,11 @@ export type AnalyzePositionRequest = {
   signal?: AbortSignal;
 };
 
+export type EvaluatePositionOptions = {
+  multipv?: number;
+  signal?: AbortSignal;
+};
+
 export type MoveEngineResult = {
   bestMove: string;
   playedMove: string;
@@ -72,11 +77,13 @@ export function scoreForColor(evaluation: NormalizedEval, color: "w" | "b") {
   return color === "w" ? whiteScore : -whiteScore;
 }
 
+const MATE_SCORE_OFFSET = 100_000;
+
 function scoreForWhite(evaluation: NormalizedEval) {
   if (typeof evaluation.mate === "number") {
     return evaluation.mate > 0
-      ? 100000 - Math.abs(evaluation.mate)
-      : -100000 + Math.abs(evaluation.mate);
+      ? MATE_SCORE_OFFSET - Math.abs(evaluation.mate)
+      : -MATE_SCORE_OFFSET + Math.abs(evaluation.mate);
   }
   return evaluation.cp ?? 0;
 }
@@ -105,7 +112,7 @@ export function classifyMoveQuality({
   missedForcingMove?: boolean;
   confidence?: EngineConfidence;
 }): MoveReviewQuality {
-  if (confidence === "failed") return evalLossCp > 250 ? "blunder" : "good";
+  if (confidence === "failed") return "good";
   const playerBefore = scoreForColor(evalBefore, playerColor);
   const playerAfter = scoreForColor(evalAfter, playerColor);
   const allowingMate = isMateAgainstColor(evalAfter, playerColor) && Math.abs(evalAfter.mate ?? 99) <= 3;
@@ -213,12 +220,20 @@ export class StockfishEngineService {
     return result.bestMove;
   }
 
-  async evaluatePosition(fen: string, depth = DEFAULT_ENGINE_DEPTH, multipv = DEFAULT_ENGINE_MULTIPV): Promise<EngineEvaluation> {
+  async evaluatePosition(
+    fen: string,
+    depth = DEFAULT_ENGINE_DEPTH,
+    optionsOrMultipv: EvaluatePositionOptions | number = DEFAULT_ENGINE_MULTIPV,
+  ): Promise<EngineEvaluation> {
+    const options = typeof optionsOrMultipv === "number"
+      ? { multipv: optionsOrMultipv }
+      : optionsOrMultipv;
     return this.analyzePosition({
       fen,
       depth,
-      multipv,
+      multipv: options.multipv ?? DEFAULT_ENGINE_MULTIPV,
       timeoutMs: Math.max(3500, depth * 450),
+      signal: options.signal,
     });
   }
 
@@ -246,7 +261,7 @@ export class StockfishEngineService {
     const played = board.move({
       from: playedUci.slice(0, 2),
       to: playedUci.slice(2, 4),
-      promotion: playedUci[4] || "q",
+      promotion: playedUci[4],
     });
     if (!played) throw new Error("The played move is not legal in the source position.");
     const after = await this.analyzePosition({
@@ -460,8 +475,14 @@ function normalizeUci(move: string) {
 export const engineService = new StockfishEngineService();
 
 function stockfishWorkerUrl() {
-  const base = document.querySelector("base")?.getAttribute("href") || "/";
-  return new URL("stockfish-18-lite-single.js", new URL(base, window.location.origin)).toString();
+  if (typeof window === "undefined") {
+    return "/stockfish-18-lite-single.js";
+  }
+  // Use document.baseURI when available; avoids SSR failures from querySelector.
+  const base = typeof document !== "undefined" && document.baseURI
+    ? document.baseURI
+    : window.location.origin;
+  return new URL("stockfish-18-lite-single.js", base).toString();
 }
 
 function assertSafeFen(fen: string) {

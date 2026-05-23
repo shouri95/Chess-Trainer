@@ -1,6 +1,13 @@
 import { ChessComGame } from "./chesscom";
 import { analyzeChessComGames, analyzePgnText } from "./patterns";
 
+type WorkerScope = {
+  onmessage: ((event: MessageEvent<WorkerRequest>) => void) | null;
+  postMessage: (message: unknown) => void;
+};
+
+const workerScope = self as unknown as WorkerScope;
+
 type WorkerRequest =
   | {
       kind: "chesscom";
@@ -13,16 +20,16 @@ type WorkerRequest =
       pgnText: string;
     };
 
-self.onmessage = (event: MessageEvent<WorkerRequest>) => {
+workerScope.onmessage = async (event: MessageEvent<WorkerRequest>) => {
   try {
     const payload = event.data;
     const report =
       payload.kind === "chesscom"
-        ? analyzeChessComGames(payload.username, payload.games)
-        : analyzePgnText(payload.username, payload.pgnText);
-    self.postMessage({ ok: true, report });
+        ? await analyzeChessComGames(payload.username, payload.games)
+        : await analyzePgnText(payload.username, payload.pgnText);
+    workerScope.postMessage({ ok: true, report });
   } catch (error) {
-    self.postMessage({
+    workerScope.postMessage({
       ok: false,
       error: error instanceof Error ? error.message : "Analysis failed."
     });

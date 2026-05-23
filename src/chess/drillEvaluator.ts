@@ -120,7 +120,7 @@ function materialGainForMove(fen: string, uci: string) {
     const played = before.move({
       from: uci.slice(0, 2),
       to: uci.slice(2, 4),
-      promotion: uci[4] || "q",
+      promotion: uci[4],
     });
     if (!played) return 0;
     return materialScore(before, color) - beforeScore;

@@ -19,6 +19,35 @@ export function normalizeStoredProfile(profile: StoredProfile | null | undefined
   };
 }
 
-export function shouldAutoSyncProfile(username: string, loading: boolean) {
-  return Boolean(username.trim()) && !isPlaceholderUsername(username) && !loading;
+export function shouldAutoSyncProfile(username: string, loading: boolean, syncEnabled = true) {
+  return Boolean(syncEnabled) && Boolean(username.trim()) && !isPlaceholderUsername(username) && !loading;
+}
+
+export function readStorageValue(key: string) {
+  try {
+    const storage = globalThis.localStorage;
+    return storage?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeStorageValue(key: string, value: string) {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return false;
+    storage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function removeStorageValue(key: string) {
+  try {
+    const storage = globalThis.localStorage;
+    storage?.removeItem(key);
+  } catch {
+    // Some browser privacy modes expose localStorage but throw on access.
+  }
 }
