@@ -96,6 +96,7 @@ type AnalysisWhyBeat = {
 };
 
 const phaseLabels: Record<Phase, string> = { opening: "Opening", middlegame: "Middlegame", endgame: "Endgame" };
+const MATE_CP_THRESHOLD = 90_000;
 const pieceGlyphs: Record<string, string> = {
   K: "♔", Q: "♕", R: "♖", B: "♗", N: "♘", P: "♙",
   k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟",
@@ -115,10 +116,14 @@ export function ExactPatternCoachMobile({
   openGame,
 }: ExactShellProps) {
   const [mobileLabPattern, setMobileLabPattern] = useState("all");
+  const [mobileLabQuality, setMobileLabQuality] = useState<MoveReviewQuality | "all">("all");
+  const [mobileLabReviewId, setMobileLabReviewId] = useState("");
+  const [mobileLabMode, setMobileLabMode] = useState<"list" | "detail">("list");
   const [mobileDrillMode, setMobileDrillMode] = useState<"picker" | "session">("picker");
 
   const openMobilePattern = (patternId: string) => {
     setMobileLabPattern(patternId || "all");
+    setMobileLabMode("list");
     setActiveView("mistakes");
   };
 
@@ -152,6 +157,12 @@ export function ExactPatternCoachMobile({
           startDrill={startDrill}
           openAnalysis={openAnalysis}
           initialPatternFilter={mobileLabPattern}
+          qualityFilter={mobileLabQuality}
+          setQualityFilter={setMobileLabQuality}
+          selectedReviewId={mobileLabReviewId}
+          setSelectedReviewId={setMobileLabReviewId}
+          mobileMode={mobileLabMode}
+          setMobileMode={setMobileLabMode}
         />
       )}
       {activeView === "drill" && (
@@ -172,7 +183,7 @@ export function ExactPatternCoachMobile({
           back={() => setActiveView(analysisReturnView)}
         />
       )}
-      <MobileTabBar activeView={activeView} setActiveView={setActiveView} />
+      <MobileTabBar activeView={activeView} analysisReturnView={analysisReturnView} setActiveView={setActiveView} openProfile={openProfile} />
       <HomeIndicator />
     </main>
   );
@@ -494,28 +505,46 @@ function GamesPage({ report, syncMeta, setActiveView, openAnalysis }: {
   );
 }
 
-function MistakeLabPage({ report, setActiveView, startDrill, openAnalysis, initialPatternFilter = "all" }: {
+function MistakeLabPage({
+  report,
+  setActiveView,
+  startDrill,
+  openAnalysis,
+  initialPatternFilter = "all",
+  qualityFilter,
+  setQualityFilter,
+  selectedReviewId,
+  setSelectedReviewId,
+  mobileMode,
+  setMobileMode,
+}: {
   report: AnalysisReport;
   setActiveView: (view: AppView) => void;
   startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: AnalysisOpenContext) => void;
   initialPatternFilter?: string;
+  qualityFilter: MoveReviewQuality | "all";
+  setQualityFilter: (quality: MoveReviewQuality | "all") => void;
+  selectedReviewId: string;
+  setSelectedReviewId: (reviewId: string) => void;
+  mobileMode: "list" | "detail";
+  setMobileMode: (mode: "list" | "detail") => void;
 }) {
   const allReviews = useMemo(() => getTrainableReviews(report), [report]);
-  const [selectedReviewId, setSelectedReviewId] = useState(allReviews[0]?.id || "");
   const [patternFilter, setPatternFilter] = useState(initialPatternFilter);
   const [detailView, setDetailView] = useState<"your" | "them" | "idea">("your");
-  const [mobileMode, setMobileMode] = useState<"list" | "detail">("list");
-  const filteredReviews = useMemo(() => allReviews.filter(review => patternFilter === "all" || review.issueIds.includes(patternFilter as never)), [allReviews, patternFilter]);
+  const patternReviews = useMemo(() => allReviews.filter(review => patternFilter === "all" || review.issueIds.includes(patternFilter as never)), [allReviews, patternFilter]);
+  const qualityOptions = useMemo(() => buildQualityFilterOptions(patternReviews), [patternReviews]);
+  const filteredReviews = useMemo(() => patternReviews.filter(review => qualityFilter === "all" || review.quality === qualityFilter), [patternReviews, qualityFilter]);
   const selectedReview = filteredReviews.find(review => review.id === selectedReviewId) || filteredReviews[0];
   const issue = selectedReview ? issueForReview(report, selectedReview, patternFilter !== "all" ? patternFilter : undefined) : null;
   const game = selectedReview ? report.gameSummaries.find(item => item.id === selectedReview.gameId) : undefined;
 
   useEffect(() => {
-    setPatternFilter(initialPatternFilter || "all");
-    setSelectedReviewId("");
-    setMobileMode("list");
-  }, [initialPatternFilter]);
+    if (qualityFilter !== "all" && !patternReviews.some(review => review.quality === qualityFilter)) {
+      setQualityFilter("all");
+    }
+  }, [patternReviews, qualityFilter, setQualityFilter]);
 
   useEffect(() => {
     if (!selectedReviewId || !filteredReviews.some(review => review.id === selectedReviewId)) {
@@ -553,6 +582,9 @@ function MistakeLabPage({ report, setActiveView, startDrill, openAnalysis, initi
             <select value={patternFilter} onChange={event => setPatternFilter(event.target.value)} aria-label="Pattern filter">
               <option value="all">All patterns</option>
               {report.summaries.map(summary => <option key={summary.id} value={summary.id}>{summary.title}</option>)}
+            </select>
+            <select value={qualityFilter} onChange={event => setQualityFilter(event.target.value as MoveReviewQuality | "all")} aria-label="Move quality filter">
+              {qualityOptions.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
             </select>
           </div>
         }
@@ -624,6 +656,9 @@ function MistakeLabPage({ report, setActiveView, startDrill, openAnalysis, initi
         selectedIssue={issue}
         patternFilter={patternFilter}
         setPatternFilter={setPatternFilter}
+        qualityFilter={qualityFilter}
+        setQualityFilter={setQualityFilter}
+        qualityOptions={qualityOptions}
         mode={mobileMode}
         setMode={setMobileMode}
         selectReview={(reviewId) => {
@@ -1071,6 +1106,9 @@ function MobileMistakeLabSurface({
   selectedIssue,
   patternFilter,
   setPatternFilter,
+  qualityFilter,
+  setQualityFilter,
+  qualityOptions,
   mode,
   setMode,
   selectReview,
@@ -1086,6 +1124,9 @@ function MobileMistakeLabSurface({
   selectedIssue: MoveIssue | null;
   patternFilter: string;
   setPatternFilter: (id: string) => void;
+  qualityFilter: MoveReviewQuality | "all";
+  setQualityFilter: (quality: MoveReviewQuality | "all") => void;
+  qualityOptions: Array<{ id: MoveReviewQuality | "all"; label: string; count: number }>;
   mode: "list" | "detail";
   setMode: (mode: "list" | "detail") => void;
   selectReview: (reviewId: string) => void;
@@ -1114,6 +1155,18 @@ function MobileMistakeLabSurface({
           </button>
         ))}
         {!patterns.length && <span className="pc-mobile-chip-empty">No active patterns</span>}
+      </div>
+      <div className="pc-mobile-chip-row pc-mobile-chip-scroll pc-mobile-quality-filters">
+        {qualityOptions.map(option => (
+          <button
+            key={option.id}
+            type="button"
+            className={qualityFilter === option.id ? "active" : ""}
+            onClick={() => setQualityFilter(option.id)}
+          >
+            {option.label}<b>{option.count}</b>
+          </button>
+        ))}
       </div>
       <div className="pc-mobile-lab-list">
         {visibleReviews.map((review) => (
@@ -1252,7 +1305,7 @@ function MobileMistakeDetailSurface({ review, issue, detailView, setDetailView, 
       <div className="pc-mobile-board-wrap">
         <DesignBoard
           fen={detailFen}
-          size={361}
+          size={313}
           flipped={review.color === "black"}
           highlights={highlights}
           arrows={arrows}
@@ -1701,7 +1754,7 @@ function MobileAnalysisMove({ move, open, whyOpen, onToggle, onWhy, whyPanel }: 
         <span>{move.ply}.{move.side === "b" ? ".." : ""}</span>
         <i className={move.side === "w" ? "white" : "black"} />
         <strong>{move.san}<em className={move.quality} /></strong>
-        <b>{move.delta === 0 ? "·" : move.delta.toFixed(1)}</b>
+        <b>{move.deltaLabel || (move.delta === 0 ? "·" : formatSignedEval(move.delta))}</b>
         <small>{move.label}</small>
       </button>
       <button className="pc-mobile-why-row" type="button" onClick={onWhy}>
@@ -2054,6 +2107,20 @@ function buildDrillCandidates(issue: MoveIssue | undefined, bestMove: string) {
   ].filter(Boolean))) as string[];
 }
 
+function buildQualityFilterOptions(reviews: MoveReview[]): Array<{ id: MoveReviewQuality | "all"; label: string; count: number }> {
+  const qualities: Array<{ id: MoveReviewQuality | "all"; label: string }> = [
+    { id: "all", label: "All" },
+    { id: "blunder", label: "Blunders" },
+    { id: "mistake", label: "Mistakes" },
+    { id: "miss", label: "Misses" },
+    { id: "inaccuracy", label: "Inaccuracies" },
+  ];
+  return qualities.map(option => ({
+    ...option,
+    count: option.id === "all" ? reviews.length : reviews.filter(review => review.quality === option.id).length,
+  })).filter(option => option.id === "all" || option.count > 0);
+}
+
 function buildMobileAnalysisRows(history: AnalysisHistoryEntry[], report: AnalysisReport, preferredReviewId?: string) {
   const preferredReview = preferredReviewId ? report.moveReviews.find(review => review.id === preferredReviewId) : undefined;
   const entries = history.length > 1
@@ -2067,7 +2134,7 @@ function buildMobileAnalysisRows(history: AnalysisHistoryEntry[], report: Analys
     const issue = review ? issueForReview(report, review) : null;
     const quality = review ? qualityClass(review.quality) : "good";
     const uci = review?.uci || entry.uci || "";
-    const evalAfter = typeof review?.engineEvalAfter === "number" ? review.engineEvalAfter / 100 : 0;
+    const evalAfter = normalizeReviewEvalToPawns(review);
     const delta = review ? -reviewLossCp(review) / 100 : 0;
     const best = review?.engineBestMove || review?.engineLines?.[0]?.bestMove || issue?.engineBestMove || "";
     const pv = review?.engineLines?.[0]?.pv || [uci, best].filter(Boolean).join(" ");
@@ -2083,6 +2150,7 @@ function buildMobileAnalysisRows(history: AnalysisHistoryEntry[], report: Analys
       bestUci: best,
       eval: evalAfter,
       delta,
+      deltaLabel: review ? formatReviewLoss(review) : "",
       quality,
       label: review ? qualityShortLabel(review.quality) : "OK",
       headline: issue?.title || review?.title || "No issue flagged",
@@ -2140,7 +2208,17 @@ function buildAnalysisLineOptionsFromPosition(fen: string, evaluation?: EngineEv
 function normalizedEvalToPawns(evaluation?: EngineEvaluation) {
   if (!evaluation) return null;
   if (typeof evaluation.mate === "number") return evaluation.mate > 0 ? 4 : -4;
-  return typeof evaluation.evalCp === "number" ? evaluation.evalCp / 100 : null;
+  return typeof evaluation.evalCp === "number" ? cpToDisplayPawns(evaluation.evalCp) : null;
+}
+
+function normalizeReviewEvalToPawns(review?: MoveReview) {
+  if (!review || typeof review.engineEvalAfter !== "number") return 0;
+  return cpToDisplayPawns(review.engineEvalAfter);
+}
+
+function cpToDisplayPawns(cp: number) {
+  if (Math.abs(cp) >= MATE_CP_THRESHOLD) return cp > 0 ? 4 : -4;
+  return clampNumber(cp / 100, -12, 12);
 }
 
 function buildAnalysisWhyBeats(
@@ -2416,6 +2494,7 @@ function formatSignedPercent(value: number) {
 }
 
 function formatSignedEval(value: number) {
+  if (Math.abs(value) >= 99) return value > 0 ? "+M" : "-M";
   if (Math.abs(value) < 0.05) return "0.0";
   return `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
 }
@@ -2966,24 +3045,26 @@ function HomeIndicator() {
   return <div className="pc-home-indicator"><i /></div>;
 }
 
-function MobileTabBar({ activeView, setActiveView }: {
+function MobileTabBar({ activeView, analysisReturnView, setActiveView, openProfile }: {
   activeView: AppView;
+  analysisReturnView: Exclude<AppView, "analysis">;
   setActiveView: (view: AppView) => void;
+  openProfile: () => void;
 }) {
   const tabs = [
     { id: "dashboard", label: "Home", icon: MobileHomeIcon },
     { id: "games", label: "Games", icon: MobileGamesIcon },
     { id: "mistakes", label: "Lab", icon: MobileLabIcon },
     { id: "drill", label: "Drill", icon: MobileDrillIcon },
-    { id: "analysis", label: "Analyze", icon: Search },
   ] as const;
   return (
     <nav className="pc-tabbar">
       {tabs.map(({ id, label, icon: Icon }) => (
-        <button key={id} className={activeView === id ? "active" : ""} onClick={() => setActiveView(id)}>
+        <button key={id} className={activeView === id || (activeView === "analysis" && analysisReturnView === id) ? "active" : ""} onClick={() => setActiveView(id)}>
           <Icon size={20} /><span>{label}</span>
         </button>
       ))}
+      <button type="button" onClick={openProfile}><MobileMeIcon size={20} /><span>Me</span></button>
     </nav>
   );
 }
@@ -3020,6 +3101,15 @@ function MobileDrillIcon({ size = 20 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 20 20" fill="none" aria-hidden="true">
       <path d="M4 4 L16 4 L10 16 Z" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+function MobileMeIcon({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <circle cx="10" cy="7" r="3" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M3 18 Q10 12 17 18" stroke="currentColor" strokeWidth="1.4" />
     </svg>
   );
 }
@@ -3283,7 +3373,12 @@ function reviewLossCp(review: MoveReview) {
 function formatReviewLoss(review: MoveReview) {
   const loss = reviewLossCp(review);
   if (!loss || loss <= 0) return "0.0";
+  if (isMateLikeCp(loss) || isMateLikeCp(review.engineEvalAfter) || review.engineLines?.some(line => typeof line.mate === "number")) return "-M";
   return `-${Math.max(0.1, loss / 100).toFixed(loss >= 1000 ? 0 : 1)}`;
+}
+
+function isMateLikeCp(value?: number) {
+  return typeof value === "number" && Math.abs(value) >= MATE_CP_THRESHOLD;
 }
 
 function formatUci(uci?: string) {
@@ -3309,8 +3404,9 @@ function formatPrincipalVariation(pv?: string) {
 }
 
 function formatCp(evalCp?: number, mate?: number) {
-  if (typeof mate === "number") return `M${mate}`;
+  if (typeof mate === "number") return mate > 0 ? `M${mate}` : `-M${Math.abs(mate)}`;
   if (typeof evalCp !== "number") return "...";
+  if (isMateLikeCp(evalCp)) return evalCp > 0 ? "+M" : "-M";
   return `${evalCp >= 0 ? "+" : ""}${(evalCp / 100).toFixed(1)}`;
 }
 

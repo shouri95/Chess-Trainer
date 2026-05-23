@@ -13391,6 +13391,37 @@ i.them { background: var(--pc-them); }
   .pc-mobile-lab-detail.in-sheet {
     overscroll-behavior: contain;
   }
+
+  .pc-mobile-sheet-backdrop {
+    background: rgba(5,5,6,0.92) !important;
+    backdrop-filter: blur(8px);
+  }
+
+  .pc-mobile-sheet {
+    max-height: calc(100dvh - 56px) !important;
+    background: #0d0d0e !important;
+  }
+
+  .pc-mobile-lab-detail.in-sheet {
+    background: #0d0d0e !important;
+  }
+
+  .pc-mobile-lab-detail .pc-mobile-board-wrap {
+    display: grid !important;
+    place-items: center !important;
+  }
+
+  .pc-mobile-lab-detail .pc-mobile-board-wrap .pc-board {
+    --pc-board-size: 313px !important;
+  }
+
+  .pc-mobile-lab-detail .pc-segmented,
+  .pc-mobile-lab-detail .pc-move-map,
+  .pc-mobile-detail-actions,
+  .pc-mobile-engine-closed {
+    position: relative;
+    z-index: 1;
+  }
 }
 
 @media (min-width: 761px) {

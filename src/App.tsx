@@ -38,6 +38,7 @@ const LATEST_SYNC_MONTHS = 2;
 const DEFAULT_MONTHS = 3;
 const DEFAULT_GAME_LIMIT = 25;
 const DEFAULT_TIME_CLASS: "all" | "rapid" | "blitz" | "bullet" | "daily" = "all";
+const MATE_CP_THRESHOLD = 90_000;
 type ReviewBucket = "blunder" | "miss" | "mistake" | "inaccuracy" | "good" | "best";
 type TrainableReviewBucket = "blunder" | "miss" | "mistake" | "inaccuracy";
 
@@ -2087,6 +2088,7 @@ function formatReviewSwing(review: MoveReview) {
 
 function formatEngineEvalLoss(lossCp: number) {
   if (lossCp <= 0) return "0.0";
+  if (lossCp >= MATE_CP_THRESHOLD) return "-M";
   const pawns = Math.max(0.1, Math.abs(lossCp) / 100);
   return `-${pawns.toFixed(pawns >= 10 ? 0 : 1)}`;
 }
