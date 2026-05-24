@@ -171,7 +171,7 @@ const pieceValues: Record<PieceSymbol, number> = {
 const copy: Record<PatternId, { title: string; advice: string }> = {
   loosePiece: { title: "Loose pieces", advice: "Scan every undefended piece before you move. If the opponent can capture it, fix that first." },
   missedForcingMove: { title: "Missed forcing moves", advice: "Run the checklist: checks, captures, threats. Candidate moves must earn their place." },
-  twoMoveBlindspot: { title: "Opponent replies ignored", advice: "After choosing a move, pause for their most annoying reply." },
+  twoMoveBlindspot: { title: "Reply tactic missed", advice: "Before confirming a candidate move, name the opponent's strongest check, capture, or threat." },
   kingShelter: { title: "King shelter weakened", advice: "The three pawns near your castled king are shelter. Don't move them without a reason." },
   delayedCastle: { title: "King in center too long", advice: "Castle or make castling possible before starting flank attacks." },
   openingTempo: { title: "Opening tempo leaking", advice: "Develop a fresh piece unless there is a tactic. Re-moving developed pieces is suspicious." },
@@ -963,6 +963,34 @@ function openingFromGame(ecoUrl?: string, pgn?: string): string | undefined {
   const fromPgn = pgn?.match(/\[Opening\s+"([^"]+)"\]/)?.[1];
   if (fromPgn) return fromPgn;
   const slug = ecoUrl?.split("/openings/")[1];
-  if (!slug) return undefined;
-  return decodeURIComponent(slug).replace(/-\d+$/, "").replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  if (slug) return decodeURIComponent(slug).replace(/-\d+$/, "").replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  return inferOpeningFromPgn(pgn);
+}
+
+function inferOpeningFromPgn(pgn?: string): string | undefined {
+  if (!pgn?.trim()) return undefined;
+  try {
+    const chess = new Chess();
+    chess.loadPgn(pgn, { strict: false });
+    const moves = chess.history();
+    const starts = (...line: string[]) => line.every((move, index) => moves[index] === move);
+    if (starts("e4", "c6")) return "Caro-Kann Defense";
+    if (starts("e4", "e6")) return moves[2] === "d4" && moves[3] === "d5" && moves[4] === "e5" ? "French Defense: Advance Variation" : "French Defense";
+    if (starts("e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "a6")) return "Sicilian Defense: Najdorf Variation";
+    if (starts("e4", "c5")) return "Sicilian Defense";
+    if (starts("e4", "e5", "Nf3", "Nc6", "Bb5")) return "Ruy Lopez";
+    if (starts("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6")) return "Italian Game: Two Knights Defense";
+    if (starts("e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5")) return "Italian Game: Giuoco Piano";
+    if (starts("e4", "e5", "Qh5")) return "King's Pawn Game: Wayward Queen Attack";
+    if (starts("d4", "d5", "c4", "c6")) return "Slav Defense";
+    if (starts("d4", "d5", "c4")) return "Queen's Gambit";
+    if (starts("d4", "Nf6", "c4", "g6")) return "King's Indian Defense";
+    if (starts("c4")) return "English Opening";
+    if (starts("Nf3")) return "Reti Opening";
+    if (starts("e4", "e5", "f4")) return "King's Gambit";
+    if (starts("d4", "g6")) return "Modern Defense";
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }

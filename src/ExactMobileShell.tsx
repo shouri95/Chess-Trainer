@@ -6,8 +6,12 @@ import type { ImportProgress } from "./analysis/chesscom";
 import { DEFAULT_ENGINE_DEPTH, DEFAULT_ENGINE_MULTIPV, type EngineEvaluation, type MoveEngineResult } from "./engine/EngineService";
 import { useStockfish } from "./engine/useStockfish";
 import { explainMove, type MoveExplanation } from "./analysis/moveExplainer";
+import { buildStruggleMap, struggleGradient, topStruggleSquares, type StruggleMap, type StrugglePhase } from "./analysis/struggleMap";
 
 type AppView = "dashboard" | "games" | "mistakes" | "patterns" | "drill" | "analysis";
+type DrillPhaseFilter = Phase | "all";
+type PatternViewFilter = StrugglePhase;
+type PatternOpeningSort = "loss" | "games" | "win" | "name";
 
 type ShellAnalysisStart = {
   fen: string;
@@ -127,6 +131,7 @@ export function ExactPatternCoachMobile({
   const [mobileLabMode, setMobileLabMode] = useState<"list" | "detail">("list");
   const [mobileDrillMode, setMobileDrillMode] = useState<"picker" | "session">("picker");
   const [mobilePatternTrap, setMobilePatternTrap] = useState<string | null>(null);
+  const patternModel = useMemo(() => buildPatternModel(report), [report]);
 
   const openMobilePattern = (patternId: string) => {
     setMobilePatternTrap(patternId || null);
@@ -196,6 +201,7 @@ export function ExactPatternCoachMobile({
       {activeView === "patterns" && (
         <PatternsPage
           report={report}
+          patternModel={patternModel}
           selectedTrapKey={mobilePatternTrap}
           setSelectedTrapKey={setMobilePatternTrap}
           startDrill={startDrill}
@@ -701,10 +707,13 @@ type PatternTrap = {
   key: string;
   patternId: string;
   opening: string;
+  openingFamily: string;
+  playerColor: "white" | "black";
   title: string;
   phase: Phase;
   count: number;
   gameCount: number;
+  gameIds: number[];
   winRate: number;
   averageLossCp: number | null;
   totalLossCp: number | null;
@@ -720,6 +729,13 @@ type PatternTrap = {
   cureAction: string;
   cureMove: string;
   cureNote: string;
+  mainLine: string;
+  mainLineMoves: string[];
+  engineLine: string;
+  weaknessCopy: string;
+  trainingFocus: string;
+  openingPlan: string;
+  momentCopy: string;
   trigger: string;
   insight: string;
   highlights: Record<string, string>;
@@ -730,6 +746,100 @@ type PatternTrap = {
   reviews: MoveReview[];
 };
 
+type PatternHeatSquare = {
+  square: string;
+  count: number;
+  lossCp: number;
+  pct: number;
+  role: "played" | "cure" | "reply";
+  label: string;
+};
+
+type PatternHeatmap = {
+  phase: Phase;
+  playerColor: "white" | "black";
+  count: number;
+  engineReviewedCount: number;
+  totalLossCp: number | null;
+  evalLabel: string;
+  fen: string;
+  squares: PatternHeatSquare[];
+  focus?: PatternHeatSquare;
+  opening?: string;
+  line: string;
+  summary: string;
+};
+
+type PatternOpeningNode = {
+  id: string;
+  phase: Phase;
+  family: string;
+  variation: string;
+  playerColor: "white" | "black";
+  lineName: string;
+  movePath: string[];
+  gameCount: number;
+  patternCount: number;
+  winRate: number;
+  avgLossCp: number | null;
+  totalLossCp: number | null;
+  topTrapKey: string;
+  plans: string[];
+  commonTraps: string[];
+};
+
+type WeaknessCluster = {
+  id: string;
+  title: string;
+  openingFamily: string;
+  lineName: string;
+  motifName: string;
+  phase: Phase;
+  count: number;
+  avgLossCp: number | null;
+  totalLossCp: number | null;
+  winRate: number;
+  focusSquares: PatternHeatSquare[];
+  topTrapKey: string;
+  trainingGoal: string;
+  status: "active" | "improving" | "worsening";
+};
+
+type PatternTrainingPlan = {
+  id: string;
+  clusterId: string;
+  trapKey: string;
+  mode: "recognition" | "prevention" | "calculation" | "repertoire";
+  title: string;
+  description: string;
+  positions: number;
+  targetMove: string;
+  successRule: string;
+  durationMin: number;
+  priority: number;
+};
+
+type PatternProgressSnapshot = {
+  activeClusters: number;
+  improvingClusters: number;
+  worseningClusters: number;
+  cleanStreak: number;
+  personalBest: number;
+  last30Firings: number;
+  headline: string;
+};
+
+type PatternModel = {
+  traps: PatternTrap[];
+  phaseStats: Array<{ phase: Phase; label: string; count: number }>;
+  heatmaps: Record<Phase, PatternHeatmap>;
+  struggleMaps: Record<StrugglePhase, StruggleMap>;
+  openings: PatternOpeningNode[];
+  clusters: WeaknessCluster[];
+  trainingPlans: PatternTrainingPlan[];
+  progress: PatternProgressSnapshot;
+};
+
 type PatternFormationStep = {
   ply: string;
   label: string;
@@ -737,13 +847,14 @@ type PatternFormationStep = {
   lastMove?: { from: string; to: string } | null;
 };
 
-function PatternsPage({ report, selectedTrapKey, setSelectedTrapKey, startDrill }: {
+function PatternsPage({ report, patternModel, selectedTrapKey, setSelectedTrapKey, startDrill }: {
   report: AnalysisReport;
+  patternModel: PatternModel;
   selectedTrapKey: string | null;
   setSelectedTrapKey: (key: string | null) => void;
   startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
 }) {
-  const traps = useMemo(() => buildPatternTrapRows(report), [report]);
+  const traps = patternModel.traps;
   const selectedTrap = selectedTrapKey
     ? traps.find(trap => trap.key === selectedTrapKey || trap.patternId === selectedTrapKey) ?? null
     : null;
@@ -760,90 +871,359 @@ function PatternsPage({ report, selectedTrapKey, setSelectedTrapKey, startDrill 
     );
   }
 
-  return <PatternOverview report={report} traps={traps} openTrap={(key) => setSelectedTrapKey(key)} startDrill={startDrill} />;
+  return <PatternOverview report={report} patternModel={patternModel} traps={traps} openTrap={(key) => setSelectedTrapKey(key)} startDrill={startDrill} />;
 }
 
-function PatternOverview({ report, traps, openTrap, startDrill }: {
+function PatternOverview({ report, patternModel, traps, openTrap, startDrill }: {
   report: AnalysisReport;
+  patternModel: PatternModel;
   traps: PatternTrap[];
   openTrap: (key: string) => void;
   startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
 }) {
-  const [activePhase, setActivePhase] = useState<Phase>("opening");
-  const phaseStats = buildPatternPhaseStats(report, traps);
-  const visibleTraps = traps.filter(trap => trap.phase === activePhase).slice(0, 4);
-  const leadTrap = visibleTraps[0];
+  const [activeFilter, setActiveFilter] = useState<PatternViewFilter>("all");
+  const [openingSort, setOpeningSort] = useState<PatternOpeningSort>("loss");
+  const phaseStats = patternModel.phaseStats;
+  const filterOptions = buildPatternFilterOptions(phaseStats);
+  const filteredTraps = activeFilter === "all" ? traps : traps.filter(trap => trap.phase === activeFilter);
+  const visibleTraps = filteredTraps.slice(0, 5);
+  const openingRows = sortPatternOpenings(patternModel.openings, openingSort);
+  const showOpenings = activeFilter === "all" || activeFilter === "opening";
+  const leadTrap = visibleTraps[0] || traps[0];
+  const struggleMap = patternModel.struggleMaps[activeFilter];
+  const windowLabel = patternWindowLabel(report);
   const totalSpots = phaseStats.reduce((sum, phase) => sum + phase.count, 0);
-  const activePhaseCount = phaseStats.find(stat => stat.phase === activePhase)?.count || 0;
-  const hasOpeningBreakdown = visibleTraps.some(trap => trap.opening !== "Unclassified games");
+  const activeCount = activeFilter === "all" ? totalSpots : phaseStats.find(stat => stat.phase === activeFilter)?.count || 0;
+  const filterLabel = activeFilter === "all" ? "all phases" : phaseLabels[activeFilter].toLowerCase();
+  const drillPattern = visibleTraps[0];
 
   useEffect(() => {
-    if (traps.some(trap => trap.phase === activePhase)) return;
-    const nextPhase = phaseStats.find(stat => stat.count > 0 && traps.some(trap => trap.phase === stat.phase))?.phase;
-    if (nextPhase && nextPhase !== activePhase) setActivePhase(nextPhase);
-  }, [activePhase, phaseStats, traps]);
+    if (activeFilter === "all" || traps.some(trap => trap.phase === activeFilter)) return;
+    setActiveFilter("all");
+  }, [activeFilter, traps]);
 
   return (
     <section className="pc-mobile-surface pc-patterns-overview">
       <div className="pc-pattern-topline">
-        <span>{totalSpots} spots · {report.games} games</span>
+        <span>{totalSpots} spots · {windowLabel}</span>
         <button type="button" aria-label="Drill all patterns" onClick={() => startDrill("all")}>⚙</button>
       </div>
       <h1>Patterns</h1>
 
-      <div className="pc-pattern-phase-tabs">
-        {phaseStats.map(stat => (
+      <div className="pc-mobile-phase-tabs pc-pattern-filter-tabs" role="tablist" aria-label="Pattern phase">
+        {filterOptions.map(option => (
           <button
-            key={stat.phase}
+            key={option.id}
             type="button"
-            className={activePhase === stat.phase ? "active" : ""}
-            onClick={() => setActivePhase(stat.phase)}
+            role="tab"
+            aria-selected={activeFilter === option.id}
+            className={activeFilter === option.id ? "active" : ""}
+            disabled={option.id !== "all" && option.count === 0}
+            onClick={() => setActiveFilter(option.id)}
           >
-            <span>{stat.label}</span><strong>{stat.count}</strong>
+            <span>{option.label}</span><b>{option.count}</b>
           </button>
         ))}
       </div>
 
       {leadTrap ? (
         <>
-          <button className="pc-pattern-board-card" type="button" onClick={() => openTrap(leadTrap.key)}>
-            <PatternBoard trap={leadTrap} />
+          <button className="pc-pattern-board-card" type="button" aria-label="Open strongest pattern detail" onClick={() => openTrap(leadTrap.key)}>
+            <MasterStruggleHeatmap
+              map={struggleMap}
+              fallbackTrap={leadTrap}
+            />
             <div className="pc-pattern-loss-strip">
-              <i style={{ width: `${patternLossPct(leadTrap, traps)}%` }} />
-              <span>{leadTrap.engineReviewedCount}/{leadTrap.count} engine reviewed</span>
-              <strong>{leadTrap.totalLossCp !== null ? formatLossCp(leadTrap.totalLossCp) : "pending"}</strong>
+              <i style={{ width: `${patternLossPct(leadTrap, traps)}%` }} aria-hidden="true" />
+              <span>{activeFilter === "all" ? "total loss" : `${phaseLabels[activeFilter]} loss`} · {windowLabel}</span>
+              <strong>{struggleMap.reviewedCount ? formatLossCp(struggleMap.totalLossCp) : "pending"}</strong>
             </div>
-            <p>{leadTrap.trigger}</p>
+            <p>{struggleMap.summary}</p>
           </button>
 
-          <section className="pc-pattern-opening-list">
-            <header>
-              <span>{hasOpeningBreakdown ? "By opening" : "By pattern"}</span>
-              <b>{hasOpeningBreakdown ? "games · win%" : "spots · avg"}</b>
-            </header>
-            {visibleTraps.map((trap, index) => (
-              <button key={trap.key} type="button" onClick={() => openTrap(trap.key)}>
-                <span>{String(index + 1).padStart(2, "0")}</span>
-                <strong>{hasOpeningBreakdown ? trap.opening : trap.title.replace(/\.$/, "")}</strong>
-                <em>{hasOpeningBreakdown ? trap.gameCount : trap.count}<small>{hasOpeningBreakdown ? "g" : ""}</small></em>
-                <b>{hasOpeningBreakdown ? trap.winRate : trap.evalLabel}<small>{hasOpeningBreakdown ? "%" : ""}</small></b>
-                <i>›</i>
-              </button>
-            ))}
-          </section>
+          {showOpenings && (
+            <PatternOpeningRepertoire
+              openings={openingRows}
+              sort={openingSort}
+              setSort={setOpeningSort}
+              openTrap={openTrap}
+            />
+          )}
 
-          <button className="pc-pattern-drill-card" type="button" onClick={() => startDrill("all", leadTrap.patternId, leadTrap.issue)}>
+          <PatternWeakSpotList traps={visibleTraps} activeFilter={activeFilter} openTrap={openTrap} />
+
+          <button className="pc-pattern-drill-card" type="button" onClick={() => startDrill("all", drillPattern?.patternId, drillPattern?.issue)}>
             <span>Drill</span>
-            <strong>{phaseLabels[activePhase].toLowerCase()} mistakes</strong>
-            <b>{activePhaseCount} <small>spots</small></b>
+            <strong>{filterLabel} mistakes</strong>
+            <b>{activeCount} <small>spots</small></b>
           </button>
         </>
       ) : (
         <div className="pc-pattern-empty-state">
-          <strong>No {phaseLabels[activePhase].toLowerCase()} pattern yet.</strong>
+          <strong>No pattern yet.</strong>
           <span>Import more games or wait for engine review to finish.</span>
         </div>
       )}
+    </section>
+  );
+}
+
+function MasterStruggleHeatmap({ map, fallbackTrap }: {
+  map: StruggleMap;
+  fallbackTrap: PatternTrap;
+}) {
+  const flipped = fallbackTrap.playerColor === "black";
+  const topSquares = topStruggleSquares(map, 3);
+  const topSquareLabel = topSquares.length ? topSquares.map(square => square.square).join(" · ") : "Clean";
+  const squareStyles = map.squares.reduce<Record<string, CSSProperties>>((acc, square) => {
+    if (square.intensity > 0) {
+      acc[square.square] = { "--pc-struggle-color": struggleGradient(square.intensity) } as CSSProperties;
+    }
+    return acc;
+  }, {});
+
+  return (
+    <div className="pc-pattern-board pc-pattern-board-struggle">
+      <span className="pc-pattern-eval-chip">{formatLossCp(map.totalLossCp)}</span>
+      <DesignBoard
+        fen={fallbackTrap.fen}
+        size={313}
+        showAnalyze={false}
+        flipped={flipped}
+        squareStyles={squareStyles}
+        arrows={[]}
+        lastMove={fallbackTrap.lastMove}
+      />
+      <div className="pc-struggle-compact-meta">
+        <span>Top squares</span>
+        <strong>{topSquareLabel}</strong>
+      </div>
+    </div>
+  );
+}
+
+function PatternOpeningRepertoire({ openings, sort, setSort, openTrap }: {
+  openings: PatternOpeningNode[];
+  sort: PatternOpeningSort;
+  setSort: (sort: PatternOpeningSort) => void;
+  openTrap: (key: string) => void;
+}) {
+  if (!openings.length) return null;
+  return (
+    <section className="pc-pattern-opening-list pc-pattern-openings-full">
+      <header className="pc-pattern-section-head">
+        <div>
+          <span>Openings played</span>
+          <b>{openings.length} lines</b>
+        </div>
+        <em>games · win · loss</em>
+      </header>
+      <div className="pc-pattern-sort-row" role="tablist" aria-label="Sort openings">
+        {([
+          { id: "loss" as const, label: "Loss" },
+          { id: "games" as const, label: "Games" },
+          { id: "win" as const, label: "Win%" },
+          { id: "name" as const, label: "A-Z" },
+        ]).map(option => (
+          <button key={option.id} type="button" role="tab" aria-selected={sort === option.id} className={sort === option.id ? "active" : ""} onClick={() => setSort(option.id)}>
+            {option.label}
+          </button>
+        ))}
+      </div>
+      <div>
+        {openings.map((opening, index) => (
+          <button
+            key={opening.id}
+            type="button"
+            className={!opening.topTrapKey ? "clean" : ""}
+            onClick={() => opening.topTrapKey && openTrap(opening.topTrapKey)}
+          >
+            <span>{String(index + 1).padStart(2, "0")}</span>
+            <div className="pc-pattern-opening-name">
+              <strong>{opening.family}</strong>
+              <small>{titleCase(opening.playerColor)} · {opening.lineName}</small>
+            </div>
+            <em>{opening.gameCount}<small>g</small></em>
+            <b>{opening.winRate}<small>%</small></b>
+            <u>{opening.avgLossCp !== null ? formatLossCp(opening.avgLossCp) : "0.0"}</u>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PatternWeakSpotList({ traps, activeFilter, openTrap }: {
+  traps: PatternTrap[];
+  activeFilter: PatternViewFilter;
+  openTrap: (key: string) => void;
+}) {
+  if (!traps.length) return null;
+  return (
+    <section className="pc-pattern-opening-list pc-pattern-weak-list">
+      <header className="pc-pattern-section-head">
+        <div>
+          <span>{activeFilter === "all" ? "Weak spots" : `${phaseLabels[activeFilter]} weak spots`}</span>
+          <b>{traps.length} shown</b>
+        </div>
+        <em>spots · loss</em>
+      </header>
+      <div>
+        {traps.map((trap, index) => (
+          <button key={trap.key} type="button" onClick={() => openTrap(trap.key)}>
+            <span>{String(index + 1).padStart(2, "0")}</span>
+            <div className="pc-pattern-opening-name">
+              <strong>{trap.title.replace(/\.$/, "")}</strong>
+              <small>{trap.openingFamily} · {phaseLabels[trap.phase]}</small>
+            </div>
+            <em>{trap.count}</em>
+            <b>{trap.evalLabel}</b>
+            <i>›</i>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PatternHeatmapBoard({ heatmap, fallbackTrap }: { heatmap: PatternHeatmap; fallbackTrap: PatternTrap }) {
+  const fen = heatmap.fen || fallbackTrap.fen;
+  const flipped = (heatmap.playerColor || fallbackTrap.playerColor) === "black";
+  const highlights = heatmap.squares.slice(0, 6).reduce<Record<string, string>>((acc, square) => {
+    acc[square.square] = square.role === "cure" ? "idea" : square.role === "reply" ? "you" : "them";
+    return acc;
+  }, {});
+
+  return (
+    <div className="pc-pattern-board pc-pattern-board-heatmap">
+      <span className="pc-pattern-eval-chip">{heatmap.evalLabel}</span>
+      <DesignBoard
+        fen={fen}
+        size={313}
+        showAnalyze={false}
+        flipped={flipped}
+        highlights={highlights}
+        arrows={[]}
+        lastMove={fallbackTrap.lastMove}
+      />
+      <div className="pc-pattern-heatmap-overlay" aria-hidden="true">
+        {heatmap.squares.slice(0, 14).map(square => {
+          const point = squareCenterPct(square.square, flipped);
+          const size = 9 + square.pct * 20;
+          const style = {
+            left: `${point.x}%`,
+            top: `${point.y}%`,
+            width: `${size}px`,
+            height: `${size}px`,
+            opacity: 0.16 + square.pct * 0.36,
+          } as CSSProperties;
+          return <i key={`${square.square}-${square.role}`} className={square.role} style={style} />;
+        })}
+      </div>
+    </div>
+  );
+}
+
+function PatternOpeningIntelligence({ openings, openTrap }: {
+  openings: PatternOpeningNode[];
+  openTrap: (key: string) => void;
+}) {
+  if (!openings.length) return null;
+  return (
+    <section className="pc-pattern-intel-section pc-pattern-opening-intel">
+      <header>
+        <span>Opening view</span>
+        <b>{openings.length} lines</b>
+      </header>
+      <div>
+        {openings.slice(0, 3).map(opening => (
+          <button key={opening.id} type="button" onClick={() => openTrap(opening.topTrapKey)}>
+            <strong>{opening.family}</strong>
+            <em>{titleCase(opening.playerColor)} · {opening.variation}</em>
+            <p>{opening.lineName}</p>
+            <footer>
+              <span>{opening.gameCount} games</span>
+              <span>{opening.patternCount} spots</span>
+              <b>{opening.avgLossCp !== null ? formatLossCp(opening.avgLossCp) : "pending"}</b>
+            </footer>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PatternWeaknessClusters({ clusters, openTrap }: {
+  clusters: WeaknessCluster[];
+  openTrap: (key: string) => void;
+}) {
+  if (!clusters.length) return null;
+  return (
+    <section className="pc-pattern-intel-section pc-pattern-clusters">
+      <header>
+        <span>Weakness clusters</span>
+        <b>{clusters.length} active</b>
+      </header>
+      <div>
+        {clusters.slice(0, 4).map(cluster => (
+          <button key={cluster.id} type="button" onClick={() => openTrap(cluster.topTrapKey)}>
+            <i className={cluster.status} />
+            <div>
+              <strong>{cluster.title}</strong>
+              <p>{cluster.openingFamily} · {phaseLabels[cluster.phase]}</p>
+            </div>
+            <span>{cluster.count}</span>
+            <b>{cluster.avgLossCp !== null ? formatLossCp(cluster.avgLossCp) : "pending"}</b>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PatternTrainingQueue({ plans, traps, startDrill }: {
+  plans: PatternTrainingPlan[];
+  traps: PatternTrap[];
+  startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
+}) {
+  if (!plans.length) return null;
+  const trapsByKey = new Map(traps.map(trap => [trap.key, trap]));
+  return (
+    <section className="pc-pattern-intel-section pc-pattern-training-queue">
+      <header>
+        <span>Training queue</span>
+        <b>{plans.length} sets</b>
+      </header>
+      <div>
+        {plans.slice(0, 3).map(plan => {
+          const trap = trapsByKey.get(plan.trapKey);
+          return (
+            <button key={plan.id} type="button" onClick={() => startDrill("all", trap?.patternId, trap?.issue)}>
+              <span>{plan.mode}</span>
+              <strong>{plan.title}</strong>
+              <p>{plan.successRule}</p>
+              <footer><b>{plan.positions} positions</b><em>{plan.durationMin} min</em></footer>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function PatternProgressPanel({ progress }: { progress: PatternProgressSnapshot }) {
+  return (
+    <section className="pc-pattern-progress-panel">
+      <header>
+        <span>Progress</span>
+        <b>{progress.activeClusters} clusters</b>
+      </header>
+      <p>{progress.headline}</p>
+      <div>
+        <span><strong>{progress.cleanStreak}</strong><em>clean</em></span>
+        <span><strong>{progress.personalBest}</strong><em>best</em></span>
+        <span><strong>{progress.last30Firings}</strong><em>firings</em></span>
+      </div>
     </section>
   );
 }
@@ -862,11 +1242,11 @@ function PatternTrapDetail({ trap, trapIndex, trapTotal, back, startDrill }: {
       <div className="pc-pattern-detail-top">
         <MobileCircleButton ariaLabel="Back to patterns" onClick={back}>‹</MobileCircleButton>
         <span>TRAP {trapIndex + 1} / {Math.max(1, trapTotal)}</span>
-        <MobileCircleButton ariaLabel="Drill this pattern" onClick={() => startDrill("all", trap.patternId, trap.issue)}>⚡</MobileCircleButton>
+        <MobileCircleButton ariaLabel="Pattern actions" onClick={() => startDrill("all", trap.patternId, trap.issue)}>⋯</MobileCircleButton>
       </div>
 
       <div className="pc-pattern-detail-title">
-        <span>{trap.opening}</span>
+        <span>{trap.openingFamily || trap.opening} · as {titleCase(trap.playerColor)}</span>
         <h1>{trap.title}</h1>
       </div>
 
@@ -887,12 +1267,23 @@ function PatternTrapDetail({ trap, trapIndex, trapTotal, back, startDrill }: {
 
       <PatternBoard trap={trap} detail />
 
-      <p className="pc-pattern-insight">{trap.insight}</p>
+      <p className="pc-pattern-insight">{trap.momentCopy}</p>
 
       <section className="pc-pattern-cue-card">
         <span>The cue</span>
         <p><i>When</i> <b>{trap.cueCopy}</b></p>
         <p><i>{trap.cureAction}</i> <strong>{trap.cureMove}</strong> <em>{trap.cureNote}</em></p>
+      </section>
+
+      <section className="pc-pattern-line-card">
+        <span>Main line context</span>
+        <div className="pc-pattern-line-moves">
+          {trap.mainLineMoves.length
+            ? trap.mainLineMoves.map((move, index) => <b key={`${move}-${index}`}>{move}</b>)
+            : <b>{trap.mainLine || "Imported game line"}</b>}
+        </div>
+        <p>{trap.openingPlan}</p>
+        <em>{trap.engineLine}</em>
       </section>
 
       <section className="pc-pattern-streak-card">
@@ -930,7 +1321,7 @@ function PatternTrapDetail({ trap, trapIndex, trapTotal, back, startDrill }: {
         <div>
           {trap.formation.map(step => (
             <article key={`${step.ply}-${step.label}`}>
-              <DesignBoard fen={step.fen} size={104} showCoords={false} showAnalyze={false} lastMove={step.lastMove} />
+              <DesignBoard fen={step.fen} size={104} showCoords={false} showAnalyze={false} flipped={trap.playerColor === "black"} lastMove={step.lastMove} />
               <span>ply</span>
               <strong>{step.ply}</strong>
               <em>{step.label}</em>
@@ -943,11 +1334,11 @@ function PatternTrapDetail({ trap, trapIndex, trapTotal, back, startDrill }: {
         <span>Before your next game</span>
         <button type="button">
           <strong>Pre-game brief</strong>
-          <em>Show this trigger before each {trap.opening} game</em>
+          <em>Show this trigger before each {trap.openingFamily || trap.opening} game</em>
         </button>
         <button type="button" onClick={() => startDrill("all", trap.patternId, trap.issue)}>
           <strong>Drill the cure</strong>
-          <em>{Math.min(20, Math.max(1, trap.count))} positions</em>
+          <em>{Math.min(20, Math.max(1, trap.count))} positions · {Math.max(1, Math.ceil(Math.min(20, Math.max(1, trap.count)) * 0.3))} min</em>
           <small>Trains the prophylactic move, not the rescue.</small>
         </button>
       </section>
@@ -982,6 +1373,7 @@ function PatternBoard({ trap, detail = false }: { trap: PatternTrap; detail?: bo
         fen={trap.fen}
         size={detail ? 313 : 313}
         showAnalyze={false}
+        flipped={trap.playerColor === "black"}
         highlights={trap.highlights}
         arrows={trap.arrows}
         lastMove={trap.lastMove}
@@ -1406,11 +1798,16 @@ function MobileDrillSurface({ report, issues, issue, index, setIndex, candidate,
   setSortOrder: (order: "pressing" | "new" | "accuracy" | "quick") => void;
 }) {
   const [sessionPatternId, setSessionPatternId] = useState("all");
+  const [drillPhase, setDrillPhase] = useState<DrillPhaseFilter>("all");
+  const phaseOptions = useMemo(() => buildDrillPhaseOptions(issues), [issues]);
+  const activeIssues = useMemo(() => {
+    return drillPhase === "all" ? issues : issues.filter(item => item.phase === drillPhase);
+  }, [drillPhase, issues]);
   const sessionIssues = useMemo(() => {
-    if (sessionPatternId === "all") return issues;
-    const filtered = issues.filter(item => String(item.id) === sessionPatternId || item.title === sessionPatternId);
-    return filtered.length ? filtered : issues;
-  }, [issues, sessionPatternId]);
+    if (sessionPatternId === "all") return activeIssues;
+    const filtered = activeIssues.filter(item => String(item.id) === sessionPatternId || item.title === sessionPatternId);
+    return filtered.length ? filtered : activeIssues;
+  }, [activeIssues, sessionPatternId]);
   const sessionIndex = Math.min(index, Math.max(0, sessionIssues.length - 1));
   const sessionIssue = sessionIssues[sessionIndex] || issue;
   const sessionBestMove = sessionIssue?.engineBestMove || "";
@@ -1418,11 +1815,18 @@ function MobileDrillSurface({ report, issues, issue, index, setIndex, candidate,
   const sessionReview = reviewForIssue(report, sessionIssue);
   const sessionGame = sessionReview ? report.gameSummaries.find(game => game.id === sessionReview.gameId) : undefined;
   const openSession = (patternId = "all") => {
+    if (!activeIssues.length) return;
     setSessionPatternId(patternId);
     setCandidate("");
     setIndex(() => 0);
     setMode("session");
   };
+
+  useEffect(() => {
+    setSessionPatternId("all");
+    setCandidate("");
+    setIndex(() => 0);
+  }, [drillPhase, setCandidate, setIndex]);
 
   if (mode === "session") {
     return (
@@ -1442,12 +1846,15 @@ function MobileDrillSurface({ report, issues, issue, index, setIndex, candidate,
     );
   }
 
-  const patterns = buildDrillPatternCatalog(report, issues);
+  const patterns = sortDrillPatterns(buildDrillPatternCatalog(report, activeIssues), sortOrder);
   const total = patterns.reduce((sum, pattern) => sum + pattern.count, 0);
+  const activeTotal = Math.max(total, activeIssues.length);
+  const phaseTitle = drillPhase === "all" ? "All" : phaseLabels[drillPhase];
+  const phaseCopy = drillPhase === "all" ? "all phases" : `${phaseLabels[drillPhase].toLowerCase()} only`;
 
   return (
     <section className="pc-mobile-surface pc-mobile-drill-picker">
-      <MobilePageHead eyebrow={`${Math.max(total, issues.length)} positions · ${patterns.length} patterns`} title="Drill" />
+      <MobilePageHead eyebrow={`${activeTotal} positions · ${patterns.length} sets`} title="Drill" />
       <div className="pc-mobile-chip-row">
         {([
           { id: "pressing" as const, label: "Most pressing" },
@@ -1458,19 +1865,35 @@ function MobileDrillSurface({ report, issues, issue, index, setIndex, candidate,
           <button key={id} className={sortOrder === id ? "active" : ""} onClick={() => setSortOrder(id)}>{label}</button>
         ))}
       </div>
-      <button className="pc-mobile-all-patterns" type="button" onClick={() => openSession("all")}>
+      <div className="pc-mobile-phase-tabs" role="tablist" aria-label="Drill phase">
+        {phaseOptions.map(option => (
+          <button
+            key={option.id}
+            type="button"
+            role="tab"
+            aria-selected={drillPhase === option.id}
+            className={drillPhase === option.id ? "active" : ""}
+            disabled={option.id !== "all" && option.count === 0}
+            onClick={() => setDrillPhase(option.id)}
+          >
+            <span>{option.label}</span>
+            <b>{option.count}</b>
+          </button>
+        ))}
+      </div>
+      <button className="pc-mobile-all-patterns" type="button" disabled={!activeIssues.length} onClick={() => openSession("all")}>
         <div>
           <Pill tone="idea">Mixed set</Pill>
-          <h2>All <i>patterns</i></h2>
-          <p>{Math.max(total, issues.length)} spots · {Math.max(1, Math.ceil(Math.max(total, issues.length) / 5))} min</p>
-          <span>{issues.length ? "Drill everything" : "No drill queue yet"}</span>
+          <h2>{phaseTitle} <i>patterns</i></h2>
+          <p>{activeTotal} spots · {Math.max(1, Math.ceil(activeTotal / 5))} min</p>
+          <span>{activeIssues.length ? `Drill ${phaseCopy}` : `No ${phaseCopy} positions yet`}</span>
         </div>
         <MobileDotMatrix />
       </button>
-      <div className="pc-mobile-by-pattern"><span>By pattern</span><b>{patterns.length} active</b></div>
+      <div className="pc-mobile-by-pattern"><span>{drillPhase === "all" ? "By pattern" : `${phaseTitle} sets`}</span><b>{patterns.length} active</b></div>
       <div className="pc-mobile-pattern-cards">
         {patterns.map(pattern => <MobilePatternCard key={pattern.id} pattern={pattern} onClick={() => openSession(pattern.id)} />)}
-        {!patterns.length && <div className="pc-mobile-empty-inline">No recurring drill patterns in this report.</div>}
+        {!patterns.length && <div className="pc-mobile-empty-inline">No recurring {phaseCopy} drill patterns in this report.</div>}
       </div>
     </section>
   );
@@ -1519,7 +1942,10 @@ function MobileDrillSession({ issue, issues, index, setIndex, candidate, setCand
         />
       </div>
       <div className="pc-mobile-session-meta">
-        <div><span>Opening</span><strong>{issue.opening || "Italian, Two Knights"}</strong></div>
+        <div>
+          <span>{issue.phase === "opening" ? "Opening" : "Phase"}</span>
+          <strong>{issue.phase === "opening" ? issue.opening || "Opening position" : phaseLabels[issue.phase]}</strong>
+        </div>
         <div><span>Pattern</span><strong>{issue.title}</strong></div>
       </div>
       <div className="pc-mobile-candidate-strip">
@@ -2073,7 +2499,10 @@ function MobileDotMatrix() {
 function MobilePatternCard({ pattern, onClick }: { pattern: ReturnType<typeof buildDrillPatternCatalog>[number]; onClick: () => void }) {
   return (
     <button className="pc-mobile-pattern-card" type="button" onClick={onClick}>
-      <div><i style={{ background: pattern.tone }} /><span>{pattern.count} pos</span></div>
+      <div>
+        <span className="pc-mobile-pattern-phase"><i style={{ background: pattern.tone }} />{pattern.subPhase || phaseLabels[pattern.phase]}</span>
+        <b>{pattern.count} pos</b>
+      </div>
       <MiniPatternBoard pattern={pattern} />
       <h3>{pattern.name}</h3>
       <p>{pattern.desc}</p>
@@ -2131,6 +2560,65 @@ function buildMobilePatterns(report: AnalysisReport) {
   }));
 }
 
+type PatternBuildContext = {
+  trainable: MoveReview[];
+  gamesById: Map<number, GameSummary>;
+  gamesByOpeningKey: Map<string, GameSummary[]>;
+  chronological: GameSummary[];
+  timelines: Map<number, GameTimelineMove[]>;
+};
+
+function buildPatternModel(report: AnalysisReport): PatternModel {
+  const context = createPatternBuildContext(report);
+  const traps = buildPatternTrapRows(report, context);
+  const heatmaps = buildPatternHeatmaps(report, traps, context);
+  const clusters = buildWeaknessClusters(traps, heatmaps);
+  return {
+    traps,
+    phaseStats: buildPatternPhaseStats(report, traps),
+    heatmaps,
+    struggleMaps: buildPatternStruggleMaps(report),
+    openings: buildPatternOpeningNodes(report, traps),
+    clusters,
+    trainingPlans: buildPatternTrainingPlans(clusters, traps),
+    progress: buildPatternProgress(clusters, traps),
+  };
+}
+
+function buildPatternStruggleMaps(report: AnalysisReport): Record<StrugglePhase, StruggleMap> {
+  return {
+    all: buildStruggleMap(report, "all"),
+    opening: buildStruggleMap(report, "opening"),
+    middlegame: buildStruggleMap(report, "middlegame"),
+    endgame: buildStruggleMap(report, "endgame"),
+  };
+}
+
+function createPatternBuildContext(report: AnalysisReport): PatternBuildContext {
+  const gamesById = new Map(report.gameSummaries.map(game => [game.id, game]));
+  const gamesByOpeningKey = new Map<string, GameSummary[]>();
+  for (const game of report.gameSummaries) {
+    const key = normalizeOpeningKey(game.opening || "Unclassified games");
+    gamesByOpeningKey.set(key, [...(gamesByOpeningKey.get(key) || []), game]);
+  }
+  return {
+    trainable: getTrainableReviews(report).filter(review => review.opening || review.issueIds.length),
+    gamesById,
+    gamesByOpeningKey,
+    chronological: chronologicalGames(report),
+    timelines: new Map(),
+  };
+}
+
+function getCachedTimeline(context: PatternBuildContext, game?: GameSummary) {
+  if (!game) return [];
+  const cached = context.timelines.get(game.id);
+  if (cached) return cached;
+  const timeline = buildGameTimeline(game, []);
+  context.timelines.set(game.id, timeline);
+  return timeline;
+}
+
 function buildPatternPhaseStats(report: AnalysisReport, traps: PatternTrap[]) {
   const trainable = getTrainableReviews(report);
   return (["opening", "middlegame", "endgame"] as const).map(phase => {
@@ -2144,8 +2632,20 @@ function buildPatternPhaseStats(report: AnalysisReport, traps: PatternTrap[]) {
   });
 }
 
-function buildPatternTrapRows(report: AnalysisReport): PatternTrap[] {
-  const trainable = getTrainableReviews(report).filter(review => review.opening || review.issueIds.length);
+function buildPatternFilterOptions(phaseStats: Array<{ phase: Phase; label: string; count: number }>): Array<{ id: PatternViewFilter; label: string; count: number }> {
+  const total = phaseStats.reduce((sum, stat) => sum + stat.count, 0);
+  return [
+    { id: "all", label: "All", count: total },
+    ...phaseStats.map(stat => ({
+      id: stat.phase,
+      label: stat.phase === "middlegame" ? "Middle" : stat.label,
+      count: stat.count,
+    })),
+  ];
+}
+
+function buildPatternTrapRows(report: AnalysisReport, context = createPatternBuildContext(report)): PatternTrap[] {
+  const trainable = context.trainable;
   if (!trainable.length) return [];
 
   const groups = new Map<string, MoveReview[]>();
@@ -2155,6 +2655,7 @@ function buildPatternTrapRows(report: AnalysisReport): PatternTrap[] {
       review.phase,
       patternId,
       normalizeOpeningKey(review.opening || "Unclassified games"),
+      review.color,
     ].join(":");
     const list = groups.get(key) || [];
     list.push(review);
@@ -2169,12 +2670,13 @@ function buildPatternTrapRows(report: AnalysisReport): PatternTrap[] {
       const issue = issueForReview(report, first, patternId) || undefined;
       const summary = report.summaries.find(item => String(item.id) === patternId);
       const opening = first.opening || "Unclassified games";
+      const openingFamily = openingFamilyName(opening);
       const openingKey = normalizeOpeningKey(opening);
-      const matchingGames = report.gameSummaries.filter(game => normalizeOpeningKey(game.opening || "") === openingKey);
       const impactedGameIds = new Set(orderedReviews.map(review => review.gameId));
-      const visibleGames = matchingGames.length
-        ? matchingGames
-        : report.gameSummaries.filter(game => impactedGameIds.has(game.id));
+      const impactedGames = report.gameSummaries.filter(game => impactedGameIds.has(game.id));
+      const matchingGames = (context.gamesByOpeningKey.get(openingKey) || report.gameSummaries.filter(game => normalizeOpeningKey(game.opening || "") === openingKey))
+        .filter(game => game.color === first.color);
+      const visibleGames = impactedGames.length ? impactedGames : matchingGames;
       const wins = visibleGames.filter(game => game.result === "win").length;
       const winRate = visibleGames.length ? Math.round((wins / visibleGames.length) * 100) : 0;
       const engineLosses = orderedReviews.map(accurateReviewLossCp).filter((loss): loss is number => typeof loss === "number");
@@ -2186,12 +2688,15 @@ function buildPatternTrapRows(report: AnalysisReport): PatternTrap[] {
       const cureMove = hasDifferentBestMove
         ? formatMoveSan(first.fenBefore, bestMove) || formatUci(bestMove) || "this position in analysis"
         : "this position in analysis";
-      const title = patternDetailTitle(summary?.title || first.title || "Recurring pattern");
-      const game = report.gameSummaries.find(item => item.id === first.gameId);
-      const reply = game ? nextMoveAfterReview(game, first) : null;
+      const rawTitle = summary?.title || first.title || "Recurring pattern";
+      const baseTitle = openingPatternTitle(opening, rawTitle, first.phase);
+      const game = context.gamesById.get(first.gameId);
+      const timeline = getCachedTimeline(context, game);
+      const reply = game ? nextMoveAfterReview(game, first, timeline) : null;
       const playedSquares = squaresForUci(first.uci);
       const replySquares = squaresForUci(reply?.uci);
       const bestSquares = squaresForUci(bestMove);
+      const title = patternTrapTitle(baseTitle, reply?.san, replySquares?.to, bestSquares?.to);
       const highlights: Record<string, string> = {};
       if (playedSquares) {
         highlights[playedSquares.from] = "them";
@@ -2201,27 +2706,41 @@ function buildPatternTrapRows(report: AnalysisReport): PatternTrap[] {
         highlights[bestSquares.from] = "idea";
         highlights[bestSquares.to] = "idea";
       }
+      if (replySquares) {
+        highlights[replySquares.to] = "you";
+      }
       const arrows: DesignArrow[] = [];
       if (playedSquares) arrows.push({ ...playedSquares, kind: "them" });
+      if (replySquares) arrows.push({ ...replySquares, kind: "you" });
       if (bestSquares) arrows.push({ ...bestSquares, kind: "idea" });
-      const streak = patternStreaks(report, orderedReviews);
-      const recentTimeline = patternRecentTimeline(report, orderedReviews);
+      const streak = patternStreaks(report, orderedReviews, context.chronological);
+      const recentTimeline = patternRecentTimeline(report, orderedReviews, context.chronological);
       const recentFirings = recentTimeline.filter(Boolean).length;
+      const mainLineMoves = mostCommonOpeningLine(context, orderedReviews);
+      const mainLine = formatMoveSequenceSan(mainLineMoves);
+      const engineLine = engineLineCopy(first);
       const cueCopy = reply?.san
-        ? `their ${reply.san} reply is available`
-        : `move ${first.moveNumber}: ${first.san} is tempting`;
+        ? `${reply.san} appears after ${formatMoveLabel(first)}`
+        : mainLine ? `${mainLine} reaches ${formatMoveLabel(first)}` : `${formatMoveLabel(first)} is the recurring choice`;
       const cureNote = bestMove
         ? hasDifferentBestMove ? "- engine-preferred prevention" : "- engine is reviewing this spot"
         : "- open analysis for the exact engine line";
+      const weaknessCopy = patternWeaknessCopy(openingFamily, title, orderedReviews, averageLossCp, engineLosses.length);
+      const trainingFocus = trainingFocusCopy(rawTitle, cureMove, mainLine, hasDifferentBestMove);
+      const openingPlan = openingPlanCopy(openingFamily, rawTitle, mainLine);
+      const momentCopy = patternMomentCopy(reply?.san, replySquares?.to, bestMove, first, title);
 
       return {
         key,
         patternId,
         opening,
+        openingFamily,
+        playerColor: first.color,
         title,
         phase: first.phase,
         count: orderedReviews.length,
-        gameCount: visibleGames.length || impactedGameIds.size,
+        gameCount: impactedGameIds.size || visibleGames.length,
+        gameIds: [...impactedGameIds],
         winRate,
         averageLossCp,
         totalLossCp,
@@ -2237,12 +2756,19 @@ function buildPatternTrapRows(report: AnalysisReport): PatternTrap[] {
         cureAction,
         cureMove,
         cureNote,
+        mainLine,
+        mainLineMoves,
+        engineLine,
+        weaknessCopy,
+        trainingFocus,
+        openingPlan,
+        momentCopy,
         trigger: patternTriggerCopy(title, orderedReviews, engineLosses.length),
         insight: issue?.explanation || first.explanation || "This pattern repeats in the selected phase.",
         highlights,
         arrows,
         lastMove: playedSquares,
-        formation: buildPatternFormation(report, first),
+        formation: buildPatternFormation(report, first, context), // buildPatternFormation(report, first)
         issue,
         reviews: orderedReviews,
       } satisfies PatternTrap;
@@ -2254,6 +2780,323 @@ function buildPatternTrapRows(report: AnalysisReport): PatternTrap[] {
     );
 
   return rows;
+}
+
+function buildPatternHeatmaps(report: AnalysisReport, traps: PatternTrap[], context: PatternBuildContext): Record<Phase, PatternHeatmap> {
+  return (["opening", "middlegame", "endgame"] as const).reduce((acc, phase) => {
+    acc[phase] = buildPatternHeatmap(report, phase, traps, context);
+    return acc;
+  }, {} as Record<Phase, PatternHeatmap>);
+}
+
+function buildPatternHeatmap(report: AnalysisReport, phase: Phase, traps: PatternTrap[], context: PatternBuildContext): PatternHeatmap {
+  const reviews = context.trainable.filter(review => review.phase === phase);
+  const phaseTraps = traps.filter(trap => trap.phase === phase);
+  const leadTrap = phaseTraps[0];
+  const squareStats = new Map<string, { count: number; lossCp: number; played: number; cure: number; reply: number }>();
+
+  const addSquare = (square: string | undefined, role: "played" | "cure" | "reply", lossCp: number, weight: number) => {
+    if (!square || !/^[a-h][1-8]$/.test(square)) return;
+    const stat = squareStats.get(square) || { count: 0, lossCp: 0, played: 0, cure: 0, reply: 0 };
+    stat.count += 1;
+    stat.lossCp += lossCp * weight;
+    stat[role] += lossCp * weight;
+    squareStats.set(square, stat);
+  };
+
+  for (const review of reviews) {
+    const loss = heatScoreCp(review);
+    const played = squaresForUci(review.uci);
+    const best = squaresForUci(review.engineBestMove || review.engineLines?.[0]?.bestMove);
+    const game = context.gamesById.get(review.gameId);
+    const reply = game ? nextMoveAfterReview(game, review, getCachedTimeline(context, game)) : null;
+    const replyMove = squaresForUci(reply?.uci);
+    addSquare(played?.to, "played", loss, 1);
+    addSquare(played?.from, "played", loss, 0.45);
+    if (best && !sameUciMove(review.uci, review.engineBestMove || review.engineLines?.[0]?.bestMove)) {
+      addSquare(best.to, "cure", loss, 0.78);
+      addSquare(best.from, "cure", loss, 0.32);
+    }
+    addSquare(replyMove?.to, "reply", loss, 0.58);
+  }
+
+  const maxLoss = Math.max(1, ...[...squareStats.values()].map(stat => stat.lossCp));
+  const squares = [...squareStats.entries()]
+    .map(([square, stat]) => {
+      const role = stat.cure > stat.played && stat.cure > stat.reply
+        ? "cure"
+        : stat.reply > stat.played
+          ? "reply"
+          : "played";
+      return {
+        square,
+        count: stat.count,
+        lossCp: stat.lossCp,
+        pct: clampNumber(stat.lossCp / maxLoss, 0.12, 1),
+        role,
+        label: role === "cure" ? "engine cure square" : role === "reply" ? "reply pressure" : "played-move leak",
+      } satisfies PatternHeatSquare;
+    })
+    .sort((a, b) => b.lossCp - a.lossCp || b.count - a.count)
+    .slice(0, 18);
+
+  const engineLosses = reviews.map(accurateReviewLossCp).filter((loss): loss is number => typeof loss === "number");
+  const totalLossCp = engineLosses.length ? engineLosses.reduce((sum, loss) => sum + loss, 0) : null;
+  const focus = squares[0];
+  const dominantOpening = leadTrap?.openingFamily || dominantOpeningForReviews(reviews);
+  const playerColor = leadTrap?.playerColor || dominantPlayerColorForReviews(reviews);
+  const line = leadTrap?.mainLine || formatMoveSequenceSan(mostCommonOpeningLine(context, reviews));
+  const summary = focus
+    ? `${reviews.length} positions analyzed. ${focus.label} on ${focus.square} is the biggest ${phaseLabels[phase].toLowerCase()} leak${dominantOpening ? ` in ${dominantOpening}` : ""}.`
+    : `${phaseLabels[phase]} positions are clean in the imported report.`;
+
+  return {
+    phase,
+    playerColor,
+    count: reviews.length,
+    engineReviewedCount: engineLosses.length,
+    totalLossCp,
+    evalLabel: formatLossCp(totalLossCp),
+    fen: leadTrap?.fen || reviews[0]?.fenBefore || new Chess().fen(),
+    squares,
+    focus,
+    opening: dominantOpening,
+    line,
+    summary,
+  };
+}
+
+function buildPatternOpeningNodes(report: AnalysisReport, traps: PatternTrap[]): PatternOpeningNode[] {
+  const trapGroups = new Map<string, PatternTrap[]>();
+  for (const trap of traps) {
+    const family = trap.openingFamily || "Unclassified games";
+    const key = [family, trap.playerColor].join(":");
+    trapGroups.set(key, [...(trapGroups.get(key) || []), trap]);
+  }
+
+  const gameGroups = new Map<string, GameSummary[]>();
+  for (const game of report.gameSummaries) {
+    const family = openingFamilyName(game.opening);
+    const key = [family, game.color].join(":");
+    gameGroups.set(key, [...(gameGroups.get(key) || []), game]);
+  }
+
+  const allKeys = new Set([...gameGroups.keys(), ...trapGroups.keys()]);
+  return [...allKeys]
+    .map((key) => {
+      const [family, color] = key.split(":");
+      const playerColor = color === "black" ? "black" : "white";
+      const group = trapGroups.get(key) || [];
+      const topTrap = group.length ? topTrapByLoss(group) : null;
+      const games = gameGroups.get(key) || [];
+      const impactedGameIds = uniqueGameIds(group.flatMap(trap => trap.reviews));
+      const impactedGames = report.gameSummaries.filter(game => impactedGameIds.has(game.id));
+      const gameCount = games.length || impactedGameIds.size || group.reduce((sum, trap) => sum + trap.gameCount, 0);
+      const statGames = games.length ? games : impactedGames;
+      const wins = statGames.filter(game => game.result === "win").length;
+      const winRate = statGames.length ? Math.round((wins / statGames.length) * 100) : topTrap?.winRate || 0;
+      const totalLossCp = group.length ? sumTrapLoss(group) : 0;
+      const reviewedCount = group.reduce((sum, trap) => sum + trap.engineReviewedCount, 0);
+      const avgLossCp = reviewedCount ? totalLossCp / reviewedCount : null;
+      const commonTraps = uniqueStrings(group.map(trap => trap.title)).slice(0, 3);
+      const sampleOpening = games.find(game => game.opening)?.opening || topTrap?.opening || family;
+      return {
+        id: stableSlug(`${family}-${playerColor}`),
+        phase: "opening",
+        family,
+        variation: openingVariationName(family),
+        playerColor,
+        lineName: topTrap?.mainLine || sampleOpening,
+        movePath: topTrap?.mainLineMoves.slice(0, 10) || [],
+        gameCount,
+        patternCount: group.reduce((sum, trap) => sum + trap.count, 0),
+        winRate,
+        avgLossCp,
+        totalLossCp: reviewedCount ? totalLossCp : null,
+        topTrapKey: topTrap?.key || "",
+        plans: uniqueStrings(group.map(trap => trap.openingPlan)).slice(0, 2),
+        commonTraps,
+      } satisfies PatternOpeningNode;
+    })
+    .sort((a, b) =>
+      (b.totalLossCp ?? 0) - (a.totalLossCp ?? 0) ||
+      b.patternCount - a.patternCount ||
+      b.gameCount - a.gameCount
+    );
+}
+
+function sortPatternOpenings(openings: PatternOpeningNode[], sort: PatternOpeningSort) {
+  return openings.slice().sort((a, b) => {
+    if (sort === "games") return b.gameCount - a.gameCount || a.family.localeCompare(b.family);
+    if (sort === "win") return a.winRate - b.winRate || b.gameCount - a.gameCount || a.family.localeCompare(b.family);
+    if (sort === "name") return a.family.localeCompare(b.family) || a.playerColor.localeCompare(b.playerColor);
+    return (b.totalLossCp ?? 0) - (a.totalLossCp ?? 0) ||
+      (b.avgLossCp ?? 0) - (a.avgLossCp ?? 0) ||
+      b.gameCount - a.gameCount ||
+      a.family.localeCompare(b.family);
+  });
+}
+
+function buildWeaknessClusters(traps: PatternTrap[], heatmaps: Record<Phase, PatternHeatmap>): WeaknessCluster[] {
+  return traps.map(trap => {
+    const heatmap = heatmaps[trap.phase];
+    const focusSquares = heatmap.squares
+      .filter(square => square.role === "played" || trap.highlights[square.square])
+      .slice(0, 4);
+    const status = patternClusterStatus(trap);
+    return {
+      id: trap.key,
+      title: trap.title,
+      openingFamily: trap.openingFamily || trap.opening,
+      lineName: trap.mainLine || trap.opening || "Imported line",
+      motifName: patternTheme(trap.title || trap.insight),
+      phase: trap.phase,
+      count: trap.count,
+      avgLossCp: trap.averageLossCp,
+      totalLossCp: trap.totalLossCp,
+      winRate: trap.winRate,
+      focusSquares,
+      topTrapKey: trap.key,
+      trainingGoal: trap.trainingFocus,
+      status,
+    } satisfies WeaknessCluster;
+  }).sort((a, b) =>
+    (b.totalLossCp ?? 0) - (a.totalLossCp ?? 0) ||
+    b.count - a.count
+  );
+}
+
+function buildPatternTrainingPlans(clusters: WeaknessCluster[], traps: PatternTrap[]): PatternTrainingPlan[] {
+  const trapsByKey = new Map(traps.map(trap => [trap.key, trap]));
+  return clusters.slice(0, 6).map((cluster, index) => {
+    const trap = trapsByKey.get(cluster.topTrapKey);
+    const mode = trainingModeForCluster(cluster, trap);
+    const positions = Math.min(20, Math.max(1, cluster.count));
+    const targetMove = trap?.cureMove || "engine line";
+    return {
+      id: `${cluster.id}:training`,
+      clusterId: cluster.id,
+      trapKey: cluster.topTrapKey,
+      mode,
+      title: trainingModeTitle(mode, cluster),
+      description: trap?.trainingFocus || cluster.trainingGoal,
+      positions,
+      targetMove,
+      successRule: trainingSuccessRule(mode, targetMove),
+      durationMin: Math.max(2, Math.ceil(positions * 0.35)),
+      priority: Math.max(1, 6 - index),
+    } satisfies PatternTrainingPlan;
+  });
+}
+
+function buildPatternProgress(clusters: WeaknessCluster[], traps: PatternTrap[]): PatternProgressSnapshot {
+  const improvingClusters = clusters.filter(cluster => cluster.status === "improving").length;
+  const worseningClusters = clusters.filter(cluster => cluster.status === "worsening").length;
+  const cleanStreak = traps.length ? Math.max(...traps.map(trap => trap.cleanGames)) : 0;
+  const personalBest = traps.length ? Math.max(...traps.map(trap => trap.personalBest)) : 0;
+  const last30Firings = traps.reduce((sum, trap) => sum + trap.recentFirings, 0);
+  const headline = worseningClusters
+    ? `${worseningClusters} cluster${worseningClusters === 1 ? "" : "s"} need attention before the next session.`
+    : improvingClusters
+      ? `${improvingClusters} cluster${improvingClusters === 1 ? "" : "s"} are improving.`
+      : clusters.length
+        ? "Patterns are active; build a clean streak to prove the fix."
+        : "No active pattern clusters yet.";
+  return {
+    activeClusters: clusters.length,
+    improvingClusters,
+    worseningClusters,
+    cleanStreak,
+    personalBest,
+    last30Firings,
+    headline,
+  };
+}
+
+function heatScoreCp(review: MoveReview) {
+  return accurateReviewLossCp(review) ?? Math.max(45, review.severity * 45);
+}
+
+function topTrapByLoss(traps: PatternTrap[]) {
+  return traps.slice().sort((a, b) =>
+    (b.totalLossCp ?? 0) - (a.totalLossCp ?? 0) ||
+    b.count - a.count
+  )[0] || traps[0];
+}
+
+function sumTrapLoss(traps: PatternTrap[]) {
+  return traps.reduce((sum, trap) => sum + (trap.totalLossCp ?? 0), 0);
+}
+
+function uniqueGameIds(reviews: MoveReview[]) {
+  return new Set(reviews.map(review => review.gameId));
+}
+
+function uniqueStrings(values: string[]) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const cleaned = value.trim();
+    if (!cleaned || seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    result.push(cleaned);
+  }
+  return result;
+}
+
+function openingVariationName(family: string) {
+  const [, variation] = family.split(",").map(part => part.trim());
+  return variation || "Main line";
+}
+
+function patternClusterStatus(trap: PatternTrap): WeaknessCluster["status"] {
+  const recent = trap.recentTimeline;
+  if (!recent.length) return "active";
+  const lastTen = recent.slice(-10);
+  const previous = recent.slice(Math.max(0, recent.length - 20), Math.max(0, recent.length - 10));
+  const recentFirings = lastTen.filter(Boolean).length;
+  const previousFirings = previous.filter(Boolean).length;
+  if (trap.cleanGames >= Math.max(3, trap.count) || (lastTen.length && recentFirings === 0)) return "improving";
+  if (previous.length && recentFirings > previousFirings) return "worsening";
+  return "active";
+}
+
+function trainingModeForCluster(cluster: WeaknessCluster, trap?: PatternTrap): PatternTrainingPlan["mode"] {
+  const text = `${cluster.title} ${cluster.motifName} ${trap?.cueCopy || ""}`.toLowerCase();
+  if (text.includes("reply") || text.includes("forcing") || text.includes("tactic")) return "calculation";
+  if (text.includes("outpost") || text.includes("diagonal") || text.includes("file") || text.includes("prevention")) return "prevention";
+  if (cluster.phase === "opening") return "repertoire";
+  return "recognition";
+}
+
+function trainingModeTitle(mode: PatternTrainingPlan["mode"], cluster: WeaknessCluster) {
+  if (mode === "calculation") return `Calculate ${cluster.title.replace(/\.$/, "")}`;
+  if (mode === "prevention") return `Prevent ${cluster.title.replace(/\.$/, "")}`;
+  if (mode === "repertoire") return `Rehearse ${cluster.openingFamily}`;
+  return `Recognize ${cluster.title.replace(/\.$/, "")}`;
+}
+
+function trainingSuccessRule(mode: PatternTrainingPlan["mode"], targetMove: string) {
+  if (mode === "calculation") return `Name the forcing reply, then choose ${targetMove}.`;
+  if (mode === "prevention") return `Play ${targetMove} before the threat appears.`;
+  if (mode === "repertoire") return "Recall the line, plan, and danger square without prompting.";
+  return "Identify the cue before choosing a candidate move.";
+}
+
+function patternWindowLabel(report: AnalysisReport) {
+  const times = report.gameSummaries
+    .map(game => game.endTime)
+    .filter((time): time is number => typeof time === "number" && time > 0);
+  if (times.length >= 2) {
+    const days = Math.max(1, Math.round((Math.max(...times) - Math.min(...times)) / 86400) + 1);
+    const displayDays = days >= 75 && days <= 105
+      ? Math.round(days / 30) * 30
+      : days >= 45
+        ? Math.round(days / 7) * 7
+        : days;
+    return `${displayDays} ${displayDays === 1 ? "day" : "days"}`;
+  }
+  return `${report.games} ${report.games === 1 ? "game" : "games"}`;
 }
 
 function dominantPatternId(reviews: MoveReview[]) {
@@ -2301,9 +3144,9 @@ function patternLossPct(trap: PatternTrap, traps: PatternTrap[]) {
   return clampNumber(((trap.totalLossCp ?? 0) / maxLoss) * 100, 8, 100);
 }
 
-function patternStreaks(report: AnalysisReport, reviews: MoveReview[]) {
+function patternStreaks(report: AnalysisReport, reviews: MoveReview[], chronological = chronologicalGames(report)) {
   const firingGameIds = new Set(reviews.map(review => review.gameId));
-  const games = chronologicalGames(report).filter(game => game.id);
+  const games = chronological.filter(game => game.id);
   let current = 0;
   let personalBest = 0;
   let lastReset = "";
@@ -2326,22 +3169,28 @@ function patternStreaks(report: AnalysisReport, reviews: MoveReview[]) {
   };
 }
 
-function patternRecentTimeline(report: AnalysisReport, reviews: MoveReview[]) {
+function patternRecentTimeline(report: AnalysisReport, reviews: MoveReview[], chronological = chronologicalGames(report)) {
   const firingGameIds = new Set(reviews.map(review => review.gameId));
-  const recentGames = chronologicalGames(report).slice(-30);
+  const recentGames = chronological.slice(-30);
   return recentGames.length
     ? recentGames.map(game => firingGameIds.has(game.id))
     : reviews.slice(-30).map(() => true);
 }
 
+const chronologicalGamesCache = new WeakMap<AnalysisReport, GameSummary[]>();
+
 function chronologicalGames(report: AnalysisReport) {
-  return report.gameSummaries.slice().sort((a, b) =>
+  const cached = chronologicalGamesCache.get(report);
+  if (cached) return cached;
+  const ordered = report.gameSummaries.slice().sort((a, b) =>
     (a.endTime ?? a.id) - (b.endTime ?? b.id)
   );
+  chronologicalGamesCache.set(report, ordered);
+  return ordered;
 }
 
-function buildPatternFormation(report: AnalysisReport, review: MoveReview): PatternFormationStep[] {
-  const game = report.gameSummaries.find(item => item.id === review.gameId);
+function buildPatternFormation(report: AnalysisReport, review: MoveReview, context?: PatternBuildContext): PatternFormationStep[] {
+  const game = context?.gamesById.get(review.gameId) || report.gameSummaries.find(item => item.id === review.gameId);
   const fallback: PatternFormationStep = {
     ply: String(review.moveNumber),
     label: review.san || "Position",
@@ -2350,7 +3199,7 @@ function buildPatternFormation(report: AnalysisReport, review: MoveReview): Patt
   };
   if (!game?.pgn) return [fallback];
 
-  const timeline = buildGameTimeline(game, []);
+  const timeline = context ? getCachedTimeline(context, game) : buildGameTimeline(game, []);
   const playedIndex = timeline.findIndex(move =>
     comparableFen(move.fenBefore) === comparableFen(review.fenBefore) &&
     move.uci === review.uci
@@ -2398,30 +3247,284 @@ function stableSlug(value: string) {
     .replace(/^-+|-+$/g, "") || "item";
 }
 
+function openingFamilyName(opening?: string) {
+  const cleaned = (opening || "Unclassified games")
+    .replace(/^[A-E][0-9]{2}\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned || cleaned === "Unclassified games") return "Unclassified games";
+  const known: Array<[RegExp, string]> = [
+    [/caro[-\s]?kann/i, "Caro-Kann"],
+    [/italian/i, "Italian"],
+    [/sicilian/i, "Sicilian"],
+    [/french/i, "French"],
+    [/queen'?s gambit/i, "Queen's Gambit"],
+    [/slav/i, "Slav"],
+    [/ruy lopez|spanish/i, "Ruy Lopez"],
+    [/king'?s indian/i, "King's Indian"],
+    [/english/i, "English"],
+    [/reti|réti/i, "Reti"],
+    [/king'?s gambit/i, "King's Gambit"],
+    [/modern/i, "Modern"],
+  ];
+  const base = known.find(([pattern]) => pattern.test(cleaned))?.[1] || cleaned.split(/[:,-]/)[0].replace(/\bDefense\b|\bGame\b|\bOpening\b/gi, "").trim();
+  const variations: Array<[RegExp, string]> = [
+    [/two knights/i, "Two Knights"],
+    [/najdorf/i, "Najdorf"],
+    [/advance/i, "Advance"],
+    [/fried liver/i, "Fried Liver"],
+    [/giuoco piano/i, "Giuoco Piano"],
+    [/open sicilian/i, "Open"],
+    [/berlin/i, "Berlin"],
+    [/slav/i, base === "Slav" ? "" : "Slav"],
+  ];
+  const variation = variations.find(([pattern]) => pattern.test(cleaned))?.[1];
+  return [base || cleaned, variation].filter(Boolean).join(", ");
+}
+
+function openingPatternTitle(opening: string, rawTitle: string, phase: Phase) {
+  const family = openingFamilyName(opening);
+  const theme = patternTheme(rawTitle);
+  if (phase === "opening" && family !== "Unclassified games") return theme;
+  return theme;
+}
+
+function patternTrapTitle(baseTitle: string, replySan?: string, replyTo?: string, bestTo?: string) {
+  const target = replyTo || bestTo || "";
+  if (target) {
+    const piece = replySan ? sanPieceName(replySan) : "";
+    const central = /^(c|d|e|f)(4|5)$/.test(target);
+    if (piece === "knight" && central) return `The ${target} outpost.`;
+    if (piece === "queen") return `The ${target} queen entry.`;
+    if (piece === "bishop") return `The ${target} diagonal.`;
+    if (piece === "rook") return `The ${target} file.`;
+    return `The ${target} reply.`;
+  }
+  return `${patternDetailTitle(baseTitle)}.`;
+}
+
+function patternTheme(rawTitle: string) {
+  const lower = rawTitle.toLowerCase();
+  if (lower.includes("opponent replies") || lower.includes("reply") || lower.includes("blindspot")) return "Reply tactic missed";
+  if (lower.includes("forcing")) return "Missed forcing line";
+  if (lower.includes("loose")) return "Loose-piece tactic";
+  if (lower.includes("tempo")) return "Development tempo";
+  if (lower.includes("queen")) return "Queen tempo";
+  if (lower.includes("castle") || lower.includes("center")) return "King safety timing";
+  if (lower.includes("shelter") || lower.includes("king")) return "King shelter";
+  if (lower.includes("endgame")) return "Endgame king route";
+  if (lower.includes("simpl")) return "Conversion choice";
+  if (lower.includes("engine")) return "Engine swing";
+  return patternDetailTitle(rawTitle);
+}
+
+function dominantOpeningForReviews(reviews: MoveReview[]) {
+  const counts = new Map<string, number>();
+  for (const review of reviews) {
+    const family = openingFamilyName(review.opening);
+    if (family === "Unclassified games") continue;
+    counts.set(family, (counts.get(family) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+}
+
+function dominantPlayerColorForReviews(reviews: MoveReview[]): "white" | "black" {
+  const black = reviews.filter(review => review.color === "black").length;
+  return black > reviews.length - black ? "black" : "white";
+}
+
+function mostCommonOpeningLine(context: PatternBuildContext, reviews: MoveReview[]) {
+  const lines = new Map<string, string[]>();
+  const counts = new Map<string, number>();
+  for (const review of reviews.slice(0, 48)) {
+    const game = context.gamesById.get(review.gameId);
+    const timeline = getCachedTimeline(context, game);
+    const line = openingLineForReview(timeline, review);
+    if (!line.length) continue;
+    const key = line.join(" ");
+    lines.set(key, line);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  const best = [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)[0]?.[0];
+  return best ? lines.get(best) || [] : [];
+}
+
+function openingLineForReview(timeline: GameTimelineMove[], review: MoveReview) {
+  if (!timeline.length) return [];
+  const playedIndex = timeline.findIndex(move =>
+    comparableFen(move.fenBefore) === comparableFen(review.fenBefore) &&
+    move.uci === review.uci
+  );
+  const end = playedIndex >= 0 ? playedIndex + 1 : Math.min(timeline.length, 10);
+  return timeline.slice(0, Math.min(end, 10)).map(move => move.san).filter(Boolean);
+}
+
+function formatMoveSequenceSan(moves: string[]) {
+  if (!moves.length) return "";
+  const parts: string[] = [];
+  for (let i = 0; i < moves.length; i += 2) {
+    const moveNumber = Math.floor(i / 2) + 1;
+    const white = moves[i];
+    const black = moves[i + 1];
+    parts.push(`${moveNumber}. ${[white, black].filter(Boolean).join(" ")}`);
+  }
+  return parts.join(" ");
+}
+
+function engineLineCopy(review: MoveReview) {
+  const line = review.engineLines?.[0];
+  const source = line?.pv || review.engineBestMove || "";
+  if (!source) return "Engine line pending";
+  const san = formatPvSan(review.fenBefore, source, 5);
+  const depth = line?.depth || review.engineDepth;
+  return `Engine line ${san}${depth ? ` · d${depth}` : ""}`;
+}
+
+function patternWeaknessCopy(opening: string, title: string, reviews: MoveReview[], averageLossCp: number | null, engineReviewedCount: number) {
+  const loss = averageLossCp === null ? "pending engine loss" : `${formatLossCp(averageLossCp)} average loss`;
+  const coverage = engineReviewedCount ? `${engineReviewedCount}/${reviews.length} engine-reviewed` : "engine review pending";
+  return `${opening} is where this cluster hurts most: ${title.toLowerCase()} across ${reviews.length} positions, ${loss}, ${coverage}.`;
+}
+
+function patternMomentCopy(replySan: string | undefined, replyTo: string | undefined, bestMove: string, review: MoveReview, title: string) {
+  if (replySan) {
+    const piece = sanPieceName(replySan);
+    const target = replyTo || sanDestination(replySan);
+    const verb = piece === "knight" ? "jump" : piece === "bishop" || piece === "rook" || piece === "queen" ? "reach" : piece === "king" ? "step" : "move";
+    return `The moment of choice. Their ${piece} will ${verb}${target ? ` to ${target}` : ""} next.`;
+  }
+  if (bestMove) {
+    const move = formatMoveSan(review.fenBefore, bestMove) || formatUci(bestMove) || "the engine move";
+    return `The moment of choice. ${move} is the engine line to know before ${formatMoveLabel(review)}.`;
+  }
+  return `The moment of choice. ${patternDetailTitle(title)} keeps recurring here.`;
+}
+
+function sanPieceName(san: string) {
+  if (/^O-O/.test(san)) return "king";
+  const piece = san.replace(/[+#?!]+/g, "").match(/^[KQRBN]/)?.[0];
+  if (piece === "N") return "knight";
+  if (piece === "B") return "bishop";
+  if (piece === "R") return "rook";
+  if (piece === "Q") return "queen";
+  if (piece === "K") return "king";
+  return "pawn";
+}
+
+function sanDestination(san: string) {
+  return san.replace(/[+#?!]+/g, "").match(/[a-h][1-8](?:=[QRBN])?$/)?.[0]?.slice(0, 2) || "";
+}
+
+function trainingFocusCopy(rawTitle: string, cureMove: string, mainLine: string, hasDifferentBestMove: boolean) {
+  const theme = patternTheme(rawTitle).toLowerCase();
+  const move = hasDifferentBestMove ? cureMove : "the engine line";
+  const line = mainLine ? ` from ${mainLine}` : "";
+  return `Train ${move}${line}; stop when the ${theme} cue appears before you move.`;
+}
+
+function openingPlanCopy(opening: string, rawTitle: string, mainLine: string) {
+  const theme = patternTheme(rawTitle).toLowerCase();
+  if (opening.includes("Caro-Kann")) return `Caro-Kann plans revolve around d4/e5 tension; this line needs the ${theme} solved before memorizing more branches.`;
+  if (opening.includes("Italian")) return `Italian positions turn on c3-d4 timing and f7 tactics; this line asks for the ${theme} before the attack starts.`;
+  if (opening.includes("Sicilian")) return `Sicilian structures punish loose move orders; lock the ${theme} into the main line before expanding the repertoire.`;
+  if (opening.includes("French")) return `French Advance games are about e5/d4 tension and breaks; train the ${theme} at the branch point.`;
+  return `${opening} reaches ${mainLine || "this recurring structure"}; train the ${theme} where it first appears.`;
+}
+
 function patternDetailTitle(title: string) {
   return title.replace(/\.$/, "").trim() || "Pattern detail";
 }
 
 function buildDrillPatternCatalog(report: AnalysisReport, issues: MoveIssue[]) {
-  const summaries = report.summaries.length ? report.summaries : groupedPatternSummaries(issues);
+  const summaries = groupedPatternSummaries(issues).map(summary => {
+    const globalSummary = report.summaries.find(item => String(item.id) === String(summary.id) || item.title === summary.title);
+    return {
+      ...summary,
+      title: globalSummary?.title || summary.title,
+      advice: globalSummary?.advice || summary.advice,
+      severity: Math.max(summary.severity, globalSummary?.severity || 0),
+    };
+  });
   const tones = ["var(--pc-you)", "var(--pc-them)", "var(--pc-idea)", "#7e7bc9", "#d17a3e", "var(--pc-neutral)"];
-  return summaries.slice(0, 6).map((summary, i) => {
+  return summaries.slice(0, 8).map((summary, i) => {
     const examples = "examples" in summary ? summary.examples : [];
     const matchingIssues = issues.filter(issue => String(issue.id) === String(summary.id) || issue.title === summary.title);
-    const matchingReviews = report.moveReviews.filter(review => review.issueIds.some(id => String(id) === String(summary.id)) || review.title === summary.title);
+    const matchingReviews = matchingIssues.length
+      ? report.moveReviews.filter(review => matchingIssues.some(issue => issueMatchesReview(issue, review)))
+      : report.moveReviews.filter(review => review.issueIds.some(id => String(id) === String(summary.id)) || review.title === summary.title);
     const example = examples?.[0] || matchingIssues[0];
     const tone = tones[i % tones.length];
     const mini = miniPatternFor(summary.title, tone);
+    const phase = dominantDrillPhase(matchingIssues, matchingReviews);
     return {
       id: String(summary.id),
       name: summary.title,
       desc: summary.advice || example?.explanation || "Drill this recurring pattern from your games.",
       count: summary.total || matchingIssues.length || matchingReviews.length,
       accuracy: patternAccuracy(matchingReviews, summary.severity),
+      phase,
+      subPhase: drillSubPhaseLabel(String(summary.id), summary.title, matchingIssues, matchingReviews, phase),
       tone,
       ...mini,
     };
   });
+}
+
+function sortDrillPatterns<T extends { count: number; accuracy: number; phase: Phase; name: string }>(patterns: T[], order: "pressing" | "new" | "accuracy" | "quick") {
+  return patterns.slice().sort((a, b) => {
+    if (order === "accuracy") return a.accuracy - b.accuracy || b.count - a.count;
+    if (order === "quick") return a.count - b.count || a.accuracy - b.accuracy;
+    if (order === "new") return phaseSortWeight(a.phase) - phaseSortWeight(b.phase) || a.name.localeCompare(b.name);
+    return b.count - a.count || a.accuracy - b.accuracy;
+  });
+}
+
+function buildDrillPhaseOptions(issues: MoveIssue[]): Array<{ id: DrillPhaseFilter; label: string; count: number }> {
+  const phases: Array<{ id: DrillPhaseFilter; label: string }> = [
+    { id: "all", label: "All" },
+    { id: "opening", label: "Opening" },
+    { id: "middlegame", label: "Middle" },
+    { id: "endgame", label: "Endgame" },
+  ];
+  return phases.map(option => ({
+    ...option,
+    count: option.id === "all" ? issues.length : issues.filter(issue => issue.phase === option.id).length,
+  }));
+}
+
+function issueMatchesReview(issue: MoveIssue, review: MoveReview) {
+  return comparableFen(issue.fenBefore) === comparableFen(review.fenBefore) &&
+    (issue.uci === review.uci || issue.san === review.san);
+}
+
+function dominantDrillPhase(issues: MoveIssue[], reviews: MoveReview[]): Phase {
+  const counts = new Map<Phase, number>();
+  for (const item of [...issues, ...reviews]) {
+    counts.set(item.phase, (counts.get(item.phase) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || phaseSortWeight(a[0]) - phaseSortWeight(b[0]))[0]?.[0] || "middlegame";
+}
+
+function drillSubPhaseLabel(id: string, title: string, issues: MoveIssue[], reviews: MoveReview[], phase: Phase) {
+  if (phase !== "endgame") return "";
+  const lower = `${id} ${title}`.toLowerCase();
+  if (lower.includes("king")) return "King activity";
+  if (lower.includes("conversion") || lower.includes("convert")) return "Conversion";
+  if (lower.includes("mate")) return "Checkmate";
+  const fens = [...issues.map(item => item.fenBefore), ...reviews.map(item => item.fenBefore)].filter(Boolean);
+  if (fens.some(isPawnOnlyEndgame)) return "Pawn endgame";
+  if (fens.some(isRookEndgame)) return "Rook endgame";
+  return "Endgame";
+}
+
+function isPawnOnlyEndgame(fen: string) {
+  const board = fen.split(" ")[0] || "";
+  return !/[qrbnQRBN]/.test(board) && /[pP]/.test(board);
+}
+
+function isRookEndgame(fen: string) {
+  const board = fen.split(" ")[0] || "";
+  return /[rR]/.test(board) && !/[qQ]/.test(board) && (board.match(/[bnBN]/g) || []).length <= 1;
 }
 
 function buildDrillCandidates(issue: MoveIssue | undefined, bestMove: string) {
@@ -3297,9 +4400,10 @@ function EvalBar({ score = 0.4, height = 480 }: { score?: number; height?: numbe
   return <div className="pc-eval-bar" style={{ height }}><i style={{ height: `${whitePct * 100}%` }} /></div>;
 }
 
-function DesignBoard({ fen = new Chess().fen(), highlights = {}, arrows = [], lastMove, size = 480, showCoords = true, flipped = false, onAnalyze, showAnalyze = true, spotlight, onSquareClick, selectedSquare, legalSquares = [] }: {
+function DesignBoard({ fen = new Chess().fen(), highlights = {}, arrows = [], lastMove, size = 480, showCoords = true, flipped = false, onAnalyze, showAnalyze = true, spotlight, onSquareClick, selectedSquare, legalSquares = [], squareStyles = {} }: {
   fen?: string;
   highlights?: Record<string, string>;
+  squareStyles?: Record<string, CSSProperties>;
   arrows?: DesignArrow[];
   lastMove?: { from: string; to: string } | null;
   size?: number;
@@ -3331,8 +4435,9 @@ function DesignBoard({ fen = new Chess().fen(), highlights = {}, arrows = [], la
         {grid.flatMap((row, r) => row.map((piece, c) => {
           const square = squareNames(r, c);
           const tone = selectedSquare === square ? "sel" : highlights[square];
+          const squareStyle = squareStyles[square];
           const isLast = lastMove && (lastMove.from === square || lastMove.to === square);
-          const className = `pc-square ${(r + c) % 2 === 0 ? "light" : "dark"} ${tone ? `hi-${tone}` : ""} ${legalSet.has(square) ? "legal" : ""} ${selectedSquare === square ? "selected" : ""} ${isLast && !tone ? "last" : ""}`;
+          const className = `pc-square ${(r + c) % 2 === 0 ? "light" : "dark"} ${tone ? `hi-${tone}` : ""} ${squareStyle ? "struggle" : ""} ${legalSet.has(square) ? "legal" : ""} ${selectedSquare === square ? "selected" : ""} ${isLast && !tone ? "last" : ""}`;
           const content = (
             <>
               {showCoords && c === 0 && <span className="pc-rank">{square[1]}</span>}
@@ -3342,13 +4447,13 @@ function DesignBoard({ fen = new Chess().fen(), highlights = {}, arrows = [], la
           );
           if (onSquareClick) {
             return (
-              <button key={`${r}-${c}`} type="button" className={className} onClick={() => onSquareClick(square)} aria-label={square}>
+              <button key={`${r}-${c}`} type="button" className={className} style={squareStyle} onClick={() => onSquareClick(square)} aria-label={square}>
                 {content}
               </button>
             );
           }
           return (
-            <div key={`${r}-${c}`} className={className}>
+            <div key={`${r}-${c}`} className={className} style={squareStyle}>
               {content}
             </div>
           );
@@ -3655,8 +4760,7 @@ function buildGameTimeline(game: GameSummary, reviews: MoveReview[]): GameTimeli
   });
 }
 
-function nextMoveAfterReview(game: GameSummary, review: MoveReview): GameTimelineMove | null {
-  const timeline = buildGameTimeline(game, []);
+function nextMoveAfterReview(game: GameSummary, review: MoveReview, timeline = buildGameTimeline(game, [])): GameTimelineMove | null {
   const playedIndex = timeline.findIndex(move =>
     comparableFen(move.fenBefore) === comparableFen(review.fenBefore) &&
     move.uci === review.uci

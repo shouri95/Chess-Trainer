@@ -175,6 +175,17 @@ describe("engine-backed classification", () => {
 });
 
 describe("opening book", () => {
+  it("infers common openings from PGN move order when tags are missing", async () => {
+    const report = await analyzePgnText("Tester", `[Event "No opening tag"]
+[White "Tester"]
+[Black "Opponent"]
+[Result "1-0"]
+
+1. e4 c6 2. d4 d5 3. Nc3 dxe4 1-0`);
+
+    expect(report.gameSummaries[0]?.opening).toBe("Caro-Kann Defense");
+  });
+
   it("protects common Sicilian theory moves", () => {
     expect(openingVerdictForMove("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2", "Nf3")?.name).toBe("Sicilian Defense");
   });

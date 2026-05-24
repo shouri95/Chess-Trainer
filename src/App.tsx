@@ -12,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { fetchChessComGames, fetchChessComProfile, ImportProgress } from "./analysis/chesscom";
+import type { ChessComGame } from "./analysis/chesscom";
 import type { AnalysisReport, MoveIssue, MoveReview, MoveReviewQuality, MoveQualityDistribution } from "./analysis/patterns";
 import type { MoveEngineResult } from "./engine/EngineService";
 import { classifyMoveQuality, DEFAULT_ENGINE_DEPTH, DEFAULT_ENGINE_MULTIPV } from "./engine/EngineService";
@@ -113,6 +114,28 @@ function friendlySyncMessage(message?: string) {
   if (!message) return "";
   if (/worker failed/i.test(message)) return "Sync needs retry.";
   return message;
+}
+
+function mergeReportAndFetchedPgns(
+  currentReport: AnalysisReport,
+  fetchedGames: ChessComGame[],
+  limit: number,
+) {
+  const byKey = new Map<string, { pgn: string; endTime: number }>();
+  const add = (key: string | undefined, pgn: string | undefined, endTime = 0) => {
+    const cleaned = pgn?.trim();
+    if (!cleaned) return;
+    byKey.set(key || cleaned.slice(0, 240), { pgn: cleaned, endTime });
+  };
+
+  currentReport.gameSummaries.forEach((game) => add(game.url, game.pgn, game.endTime ?? 0));
+  fetchedGames.forEach((game) => add(game.url, game.pgn, game.end_time ?? 0));
+
+  return [...byKey.values()]
+    .sort((a, b) => a.endTime - b.endTime)
+    .slice(-Math.max(1, limit))
+    .map((game) => game.pgn)
+    .join("\n\n");
 }
 
 // ── quality helpers (shared with background‑refine loop) ──
@@ -977,14 +1000,15 @@ export default function App() {
       const isSameConnectedUser = sameChessComUsername(syncUsername, connectedUsername);
       const isLatestRefresh = Boolean(options.keepCurrentReport && currentReport && isSameConnectedUser);
       const syncMonths = isLatestRefresh ? Math.min(Math.max(months, LATEST_SYNC_MONTHS), 3) : months;
-      const syncLimit = isLatestRefresh ? Math.max(gameLimit, 120) : gameLimit;
+      const syncLimit = Math.max(1, gameLimit);
       const games = await fetchChessComGames(syncUsername, syncMonths, timeClass, progressHandler, syncLimit);
       const knownUrls = new Set(
         (isLatestRefresh ? currentReport?.gameSummaries ?? [] : []).map((g) => g.url).filter(Boolean),
       );
       const newGames = isLatestRefresh ? games.filter((g) => !g.url || !knownUrls.has(g.url)) : games;
+      const needsLimitRepair = Boolean(isLatestRefresh && currentReport && currentReport.games > syncLimit);
 
-      if (isLatestRefresh && !newGames.length) {
+      if (isLatestRefresh && !newGames.length && !needsLimitRepair) {
         setSyncMeta({
           status: "idle",
           source: "chesscom",
@@ -1008,10 +1032,7 @@ export default function App() {
               {
                 kind: "pgn",
                 username: syncUsername,
-                pgnText: [
-                  ...currentReport.gameSummaries.map((g) => g.pgn),
-                  ...gamesForAnalysis.map((g) => g.pgn),
-                ].join("\n\n"),
+                pgnText: mergeReportAndFetchedPgns(currentReport, gamesForAnalysis, syncLimit),
               },
               controller.signal,
             )
@@ -1041,7 +1062,9 @@ export default function App() {
         source: "chesscom",
         lastSyncedAt: Date.now(),
         message: isLatestRefresh
-          ? `Added ${gamesForAnalysis.length} new game${gamesForAnalysis.length === 1 ? "" : "s"}`
+          ? needsLimitRepair
+            ? `Kept latest ${nextReport.games} games`
+            : `Added ${gamesForAnalysis.length} new game${gamesForAnalysis.length === 1 ? "" : "s"}`
           : `Synced ${nextReport.games} games`,
       });
       if (!nextReport.games) setError("No standard chess games matched that username and filter.");
