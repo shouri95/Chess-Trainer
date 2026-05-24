@@ -7,7 +7,7 @@ import { DEFAULT_ENGINE_DEPTH, DEFAULT_ENGINE_MULTIPV, type EngineEvaluation, ty
 import { useStockfish } from "./engine/useStockfish";
 import { explainMove, type MoveExplanation } from "./analysis/moveExplainer";
 
-type AppView = "dashboard" | "games" | "mistakes" | "drill" | "analysis";
+type AppView = "dashboard" | "games" | "mistakes" | "patterns" | "drill" | "analysis";
 
 type ShellAnalysisStart = {
   fen: string;
@@ -35,9 +35,14 @@ type ExactShellProps = {
   syncMeta?: SyncMeta;
   analysisStart?: ShellAnalysisStart | null;
   openProfile: () => void;
+  openMenu: () => void;
   startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: AnalysisOpenContext) => void;
   openGame: (gameId: number) => void;
+  selectedGameId: number | null;
+  drillQuality: MoveReviewQuality | "all";
+  drillPatternId: string;
+  drillIssue: MoveIssue | null;
 };
 
 type DesignArrow = { from: string; to: string; kind?: "you" | "them" | "idea" | "neutral" };
@@ -107,20 +112,46 @@ export function ExactPatternCoachMobile({
   syncMeta,
   analysisStart,
   openProfile,
+  openMenu,
   startDrill,
   openAnalysis,
   openGame,
+  selectedGameId,
+  drillQuality,
+  drillPatternId,
+  drillIssue,
 }: ExactShellProps) {
   const [mobileLabPattern, setMobileLabPattern] = useState("all");
   const [mobileLabQuality, setMobileLabQuality] = useState<MoveReviewQuality | "all">("all");
   const [mobileLabReviewId, setMobileLabReviewId] = useState("");
   const [mobileLabMode, setMobileLabMode] = useState<"list" | "detail">("list");
   const [mobileDrillMode, setMobileDrillMode] = useState<"picker" | "session">("picker");
+  const [mobilePatternTrap, setMobilePatternTrap] = useState<string | null>(null);
 
   const openMobilePattern = (patternId: string) => {
-    setMobileLabPattern(patternId || "all");
-    setMobileLabMode("list");
-    setActiveView("mistakes");
+    setMobilePatternTrap(patternId || null);
+    setActiveView("patterns");
+  };
+
+  const openPatternsHome = () => {
+    setMobilePatternTrap(null);
+    setActiveView("patterns");
+  };
+
+  const navigateWithReset = (view: AppView) => {
+    if (view !== activeView) {
+      if (view === "mistakes") {
+        setMobileLabMode("list");
+        setMobileLabReviewId("");
+      }
+      if (view === "drill") {
+        setMobileDrillMode("picker");
+      }
+    }
+    if (view === "patterns") {
+      setMobilePatternTrap(null);
+    }
+    setActiveView(view);
   };
 
   return (
@@ -144,6 +175,7 @@ export function ExactPatternCoachMobile({
           syncMeta={syncMeta}
           setActiveView={setActiveView}
           openAnalysis={openAnalysis}
+          preselectedGameId={selectedGameId}
         />
       )}
       {activeView === "mistakes" && (
@@ -161,6 +193,14 @@ export function ExactPatternCoachMobile({
           setMobileMode={setMobileLabMode}
         />
       )}
+      {activeView === "patterns" && (
+        <PatternsPage
+          report={report}
+          selectedTrapKey={mobilePatternTrap}
+          setSelectedTrapKey={setMobilePatternTrap}
+          startDrill={startDrill}
+        />
+      )}
       {activeView === "drill" && (
         <DrillPage
           report={report}
@@ -169,6 +209,9 @@ export function ExactPatternCoachMobile({
           openAnalysis={openAnalysis}
           mobileMode={mobileDrillMode}
           setMobileMode={setMobileDrillMode}
+          drillQuality={drillQuality}
+          drillPatternId={drillPatternId}
+          drillIssue={drillIssue}
         />
       )}
       {activeView === "analysis" && (
@@ -184,7 +227,13 @@ export function ExactPatternCoachMobile({
           }}
         />
       )}
-      <MobileTabBar activeView={activeView} analysisReturnView={analysisReturnView} setActiveView={setActiveView} openProfile={openProfile} />
+      <MobileTabBar
+        activeView={activeView}
+        analysisReturnView={analysisReturnView}
+        setActiveView={navigateWithReset}
+        openMenu={openMenu}
+        openProfile={openProfile}
+      />
       <HomeIndicator />
     </main>
   );
@@ -276,7 +325,7 @@ export function ExactMobileImport({
         </div>
         <div className="pc-import-actions">
           <Button primary onClick={connectAndSync} disabled={loading || !username.trim()}>{loading ? "Syncing..." : "Sync games"} <span>↗</span></Button>
-          <Button onClick={openProfile}>Paste PGN</Button>
+          <Button onClick={openProfile}>PGN tools</Button>
           <Button ghost onClick={loadSample}>Try sample</Button>
         </div>
         <div className="pc-import-foot">LOCAL ANALYSIS · NO ACCOUNT REQUIRED · STOCKFISH 18</div>
@@ -375,24 +424,44 @@ function DashboardPage({ report, username, syncMeta, setActiveView, openProfile,
   );
 }
 
-function GamesPage({ report, syncMeta, setActiveView, openAnalysis }: {
+function GamesPage({ report, syncMeta, setActiveView, openAnalysis, preselectedGameId }: {
   report: AnalysisReport;
   syncMeta?: SyncMeta;
   setActiveView: (view: AppView) => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: AnalysisOpenContext) => void;
+  preselectedGameId: number | null;
 }) {
-  const [timeFilter, setTimeFilter] = useState("all");
+  const [gameFilter, setGameFilter] = useState("all");
   const [mode, setMode] = useState<"list" | "detail">("list");
   const [selectedGameId, setSelectedGameId] = useState(-1);
   const [selectedPly, setSelectedPly] = useState(0);
   const [boardFlipped, setBoardFlipped] = useState(false);
 
-  const games = useMemo(() => report.gameSummaries
-    .filter(game => timeFilter === "all" || game.timeClass === timeFilter)
+  const allSorted = useMemo(() => report.gameSummaries
     .slice()
-    .sort((a, b) => (b.endTime ?? b.id) - (a.endTime ?? a.id)), [report.gameSummaries, timeFilter]);
+    .sort((a, b) => (b.endTime ?? b.id) - (a.endTime ?? a.id)), [report.gameSummaries]);
 
-  const selectedGame = games.find(g => g.id === selectedGameId) || games[0];
+  const visibleGames = useMemo(() => allSorted.filter(game => {
+    if (gameFilter === "all") return true;
+    if (gameFilter === "mistakes") return game.issues > 0;
+    if (gameFilter === "white") return game.color === "white";
+    if (gameFilter === "black") return game.color === "black";
+    if (gameFilter === "rapid" || gameFilter === "blitz" || gameFilter === "bullet" || gameFilter === "daily") return game.timeClass === gameFilter;
+    return true;
+  }), [allSorted, gameFilter]);
+
+  useEffect(() => {
+    if (preselectedGameId !== null && preselectedGameId !== undefined) {
+      const target = allSorted.find(g => g.id === preselectedGameId);
+      if (target) {
+        setSelectedGameId(preselectedGameId);
+        setMode("detail");
+        setSelectedPly(0);
+      }
+    }
+  }, [preselectedGameId, allSorted]);
+
+  const selectedGame = visibleGames.find(g => g.id === selectedGameId) || visibleGames[0];
   const reviews = useMemo(() => report.moveReviews.filter(r => r.gameId === selectedGame?.id), [report.moveReviews, selectedGame?.id]);
   const timeline = useMemo(() => selectedGame ? buildGameTimeline(selectedGame, reviews) : [], [selectedGame, reviews]);
   const currentFen = selectedPly > 0 && timeline.length
@@ -473,19 +542,14 @@ function GamesPage({ report, syncMeta, setActiveView, openAnalysis }: {
 
   return (
     <section className="pc-mobile-surface pc-mobile-games">
-      <MobilePageHead eyebrow={`${games.length} of ${report.games} games`} title="Games" />
+      <MobilePageHead eyebrow={`${visibleGames.length} of ${report.games} games`} title="Games" />
       <div className="pc-mobile-chip-row">
         {(Object.entries({ all: "All", mistakes: "With mistakes", white: "White", black: "Black" }) as [string, string][]).map(([id, label]) => (
-          <button key={id} className={timeFilter === id ? "active" : ""} onClick={() => setTimeFilter(id)}>{label}</button>
+          <button key={id} className={gameFilter === id ? "active" : ""} onClick={() => setGameFilter(id)}>{label}</button>
         ))}
       </div>
       <div className="pc-mobile-row-list">
-        {games.filter(g => {
-          if (timeFilter === "mistakes") return g.issues > 0;
-          if (timeFilter === "white") return g.color === "white";
-          if (timeFilter === "black") return g.color === "black";
-          return true;
-        }).map(game => (
+        {visibleGames.map(game => (
           <button key={game.id} className="pc-mobile-game-row" onClick={() => { setSelectedGameId(game.id); setMode("detail"); }}>
             <span className={game.result}>{game.result === "win" ? "W" : game.result === "loss" ? "L" : game.result === "draw" ? "D" : "?"}</span>
             <div><strong>{game.opponent || "Unknown opponent"}</strong><small>{[game.opening, game.timeClass, formatGameDate(game.endTime)].filter(Boolean).join(" · ")}</small></div>
@@ -493,7 +557,7 @@ function GamesPage({ report, syncMeta, setActiveView, openAnalysis }: {
             <em>›</em>
           </button>
         ))}
-        {games.length === 0 && <div className="pc-mobile-empty-inline">No games match this filter.</div>}
+        {visibleGames.length === 0 && <div className="pc-mobile-empty-inline">No games match this filter.</div>}
       </div>
     </section>
   );
@@ -535,6 +599,10 @@ function MistakeLabPage({
   const game = selectedReview ? report.gameSummaries.find(item => item.id === selectedReview.gameId) : undefined;
 
   useEffect(() => {
+    setPatternFilter(initialPatternFilter);
+  }, [initialPatternFilter]);
+
+  useEffect(() => {
     if (qualityFilter !== "all" && !patternReviews.some(review => review.quality === qualityFilter)) {
       setQualityFilter("all");
     }
@@ -572,17 +640,34 @@ function MistakeLabPage({
   );
 }
 
-function DrillPage({ report, setActiveView, startDrill, openAnalysis, mobileMode, setMobileMode }: {
+function DrillPage({ report, setActiveView, startDrill, openAnalysis, mobileMode, setMobileMode, drillQuality, drillPatternId, drillIssue }: {
   report: AnalysisReport;
   setActiveView: (view: AppView) => void;
   startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: AnalysisOpenContext) => void;
   mobileMode: "picker" | "session";
   setMobileMode: (mode: "picker" | "session") => void;
+  drillQuality: MoveReviewQuality | "all";
+  drillPatternId: string;
+  drillIssue: MoveIssue | null;
 }) {
-  const issues = useMemo(() => report.issues.slice().sort((a, b) => b.severity - a.severity), [report.issues]);
+  const issues = useMemo(() => {
+    let filtered = report.issues.slice().sort((a, b) => b.severity - a.severity);
+    if (drillQuality && drillQuality !== "all") {
+      filtered = filtered.filter(i => i.quality === drillQuality);
+    }
+    if (drillPatternId && drillPatternId !== "all") {
+      filtered = filtered.filter(i => i.id === drillPatternId || i.title === drillPatternId);
+    }
+    if (drillIssue) {
+      const exact = filtered.find(i => i.fenBefore === drillIssue.fenBefore && i.uci === drillIssue.uci);
+      if (exact) filtered = [exact, ...filtered.filter(i => i !== exact)];
+    }
+    return filtered.length ? filtered : report.issues.slice().sort((a, b) => b.severity - a.severity);
+  }, [report.issues, drillQuality, drillPatternId, drillIssue]);
   const [index, setIndex] = useState(0);
   const [candidate, setCandidate] = useState("");
+  const [sortOrder, setSortOrder] = useState<"pressing" | "new" | "accuracy" | "quick">("pressing");
   const issue = issues[index] || issues[0];
   const bestMove = issue?.engineBestMove || "";
 
@@ -606,7 +691,302 @@ function DrillPage({ report, setActiveView, startDrill, openAnalysis, mobileMode
       mode={mobileMode}
       setMode={setMobileMode}
       openAnalysis={openAnalysis}
+      sortOrder={sortOrder}
+      setSortOrder={setSortOrder}
     />
+  );
+}
+
+type PatternTrap = {
+  key: string;
+  patternId: string;
+  opening: string;
+  title: string;
+  phase: Phase;
+  count: number;
+  gameCount: number;
+  winRate: number;
+  averageLossCp: number | null;
+  totalLossCp: number | null;
+  engineReviewedCount: number;
+  cleanGames: number;
+  lastReset: string;
+  personalBest: number;
+  recentFirings: number;
+  recentTimeline: boolean[];
+  fen: string;
+  evalLabel: string;
+  cueCopy: string;
+  cureAction: string;
+  cureMove: string;
+  cureNote: string;
+  trigger: string;
+  insight: string;
+  highlights: Record<string, string>;
+  arrows: DesignArrow[];
+  lastMove?: { from: string; to: string } | null;
+  formation: PatternFormationStep[];
+  issue?: MoveIssue;
+  reviews: MoveReview[];
+};
+
+type PatternFormationStep = {
+  ply: string;
+  label: string;
+  fen: string;
+  lastMove?: { from: string; to: string } | null;
+};
+
+function PatternsPage({ report, selectedTrapKey, setSelectedTrapKey, startDrill }: {
+  report: AnalysisReport;
+  selectedTrapKey: string | null;
+  setSelectedTrapKey: (key: string | null) => void;
+  startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
+}) {
+  const traps = useMemo(() => buildPatternTrapRows(report), [report]);
+  const selectedTrap = selectedTrapKey
+    ? traps.find(trap => trap.key === selectedTrapKey || trap.patternId === selectedTrapKey) ?? null
+    : null;
+
+  if (selectedTrap) {
+    return (
+      <PatternTrapDetail
+        trap={selectedTrap}
+        trapIndex={Math.max(0, traps.findIndex(trap => trap.key === selectedTrap.key))}
+        trapTotal={traps.length}
+        back={() => setSelectedTrapKey(null)}
+        startDrill={startDrill}
+      />
+    );
+  }
+
+  return <PatternOverview report={report} traps={traps} openTrap={(key) => setSelectedTrapKey(key)} startDrill={startDrill} />;
+}
+
+function PatternOverview({ report, traps, openTrap, startDrill }: {
+  report: AnalysisReport;
+  traps: PatternTrap[];
+  openTrap: (key: string) => void;
+  startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
+}) {
+  const [activePhase, setActivePhase] = useState<Phase>("opening");
+  const phaseStats = buildPatternPhaseStats(report, traps);
+  const visibleTraps = traps.filter(trap => trap.phase === activePhase).slice(0, 4);
+  const leadTrap = visibleTraps[0];
+  const totalSpots = phaseStats.reduce((sum, phase) => sum + phase.count, 0);
+  const activePhaseCount = phaseStats.find(stat => stat.phase === activePhase)?.count || 0;
+  const hasOpeningBreakdown = visibleTraps.some(trap => trap.opening !== "Unclassified games");
+
+  useEffect(() => {
+    if (traps.some(trap => trap.phase === activePhase)) return;
+    const nextPhase = phaseStats.find(stat => stat.count > 0 && traps.some(trap => trap.phase === stat.phase))?.phase;
+    if (nextPhase && nextPhase !== activePhase) setActivePhase(nextPhase);
+  }, [activePhase, phaseStats, traps]);
+
+  return (
+    <section className="pc-mobile-surface pc-patterns-overview">
+      <div className="pc-pattern-topline">
+        <span>{totalSpots} spots · {report.games} games</span>
+        <button type="button" aria-label="Drill all patterns" onClick={() => startDrill("all")}>⚙</button>
+      </div>
+      <h1>Patterns</h1>
+
+      <div className="pc-pattern-phase-tabs">
+        {phaseStats.map(stat => (
+          <button
+            key={stat.phase}
+            type="button"
+            className={activePhase === stat.phase ? "active" : ""}
+            onClick={() => setActivePhase(stat.phase)}
+          >
+            <span>{stat.label}</span><strong>{stat.count}</strong>
+          </button>
+        ))}
+      </div>
+
+      {leadTrap ? (
+        <>
+          <button className="pc-pattern-board-card" type="button" onClick={() => openTrap(leadTrap.key)}>
+            <PatternBoard trap={leadTrap} />
+            <div className="pc-pattern-loss-strip">
+              <i style={{ width: `${patternLossPct(leadTrap, traps)}%` }} />
+              <span>{leadTrap.engineReviewedCount}/{leadTrap.count} engine reviewed</span>
+              <strong>{leadTrap.totalLossCp !== null ? formatLossCp(leadTrap.totalLossCp) : "pending"}</strong>
+            </div>
+            <p>{leadTrap.trigger}</p>
+          </button>
+
+          <section className="pc-pattern-opening-list">
+            <header>
+              <span>{hasOpeningBreakdown ? "By opening" : "By pattern"}</span>
+              <b>{hasOpeningBreakdown ? "games · win%" : "spots · avg"}</b>
+            </header>
+            {visibleTraps.map((trap, index) => (
+              <button key={trap.key} type="button" onClick={() => openTrap(trap.key)}>
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <strong>{hasOpeningBreakdown ? trap.opening : trap.title.replace(/\.$/, "")}</strong>
+                <em>{hasOpeningBreakdown ? trap.gameCount : trap.count}<small>{hasOpeningBreakdown ? "g" : ""}</small></em>
+                <b>{hasOpeningBreakdown ? trap.winRate : trap.evalLabel}<small>{hasOpeningBreakdown ? "%" : ""}</small></b>
+                <i>›</i>
+              </button>
+            ))}
+          </section>
+
+          <button className="pc-pattern-drill-card" type="button" onClick={() => startDrill("all", leadTrap.patternId, leadTrap.issue)}>
+            <span>Drill</span>
+            <strong>{phaseLabels[activePhase].toLowerCase()} mistakes</strong>
+            <b>{activePhaseCount} <small>spots</small></b>
+          </button>
+        </>
+      ) : (
+        <div className="pc-pattern-empty-state">
+          <strong>No {phaseLabels[activePhase].toLowerCase()} pattern yet.</strong>
+          <span>Import more games or wait for engine review to finish.</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PatternTrapDetail({ trap, trapIndex, trapTotal, back, startDrill }: {
+  trap: PatternTrap;
+  trapIndex: number;
+  trapTotal: number;
+  back: () => void;
+  startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
+}) {
+  const examples = trap.reviews.slice(0, 3);
+
+  return (
+    <section className="pc-mobile-surface pc-pattern-trap-detail">
+      <div className="pc-pattern-detail-top">
+        <MobileCircleButton ariaLabel="Back to patterns" onClick={back}>‹</MobileCircleButton>
+        <span>TRAP {trapIndex + 1} / {Math.max(1, trapTotal)}</span>
+        <MobileCircleButton ariaLabel="Drill this pattern" onClick={() => startDrill("all", trap.patternId, trap.issue)}>⚡</MobileCircleButton>
+      </div>
+
+      <div className="pc-pattern-detail-title">
+        <span>{trap.opening}</span>
+        <h1>{trap.title}</h1>
+      </div>
+
+      <div className="pc-pattern-detail-stats">
+        <article>
+          <strong>{trap.gameCount}</strong>
+          <span>games</span>
+        </article>
+        <article>
+          <strong>{trap.winRate}%</strong>
+          <span>win</span>
+        </article>
+        <article>
+          <strong>{trap.evalLabel}</strong>
+          <span>avg loss</span>
+        </article>
+      </div>
+
+      <PatternBoard trap={trap} detail />
+
+      <p className="pc-pattern-insight">{trap.insight}</p>
+
+      <section className="pc-pattern-cue-card">
+        <span>The cue</span>
+        <p><i>When</i> <b>{trap.cueCopy}</b></p>
+        <p><i>{trap.cureAction}</i> <strong>{trap.cureMove}</strong> <em>{trap.cureNote}</em></p>
+      </section>
+
+      <section className="pc-pattern-streak-card">
+        <header>
+          <span>Avoidance streak</span>
+          <strong>{trap.cleanGames}</strong>
+        </header>
+        <div>
+          <span>games clean</span>
+          <b>last reset</b>
+          <em>{trap.lastReset}</em>
+        </div>
+        <footer>
+          <span>Personal best</span>
+          <b>{trap.personalBest}</b>
+        </footer>
+        <div className="pc-pattern-firings">
+          <span>Last 30 games</span>
+          <b>{trap.recentFirings} firings</b>
+        </div>
+        <div className="pc-pattern-spark-rail">
+          <span>OLDEST</span>
+          <div>
+            {trap.recentTimeline.map((fired, index) => <i key={index} className={fired ? "fired" : ""} />)}
+          </div>
+          <b>NOW</b>
+        </div>
+      </section>
+
+      <section className="pc-pattern-formation">
+        <header>
+          <span>How it forms</span>
+          <b>{trap.formation.length} plies</b>
+        </header>
+        <div>
+          {trap.formation.map(step => (
+            <article key={`${step.ply}-${step.label}`}>
+              <DesignBoard fen={step.fen} size={104} showCoords={false} showAnalyze={false} lastMove={step.lastMove} />
+              <span>ply</span>
+              <strong>{step.ply}</strong>
+              <em>{step.label}</em>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="pc-pattern-before-game">
+        <span>Before your next game</span>
+        <button type="button">
+          <strong>Pre-game brief</strong>
+          <em>Show this trigger before each {trap.opening} game</em>
+        </button>
+        <button type="button" onClick={() => startDrill("all", trap.patternId, trap.issue)}>
+          <strong>Drill the cure</strong>
+          <em>{Math.min(20, Math.max(1, trap.count))} positions</em>
+          <small>Trains the prophylactic move, not the rescue.</small>
+        </button>
+      </section>
+
+      <section className="pc-pattern-recent">
+        <header>
+          <span>Recent firings</span>
+          <b>{Math.min(3, examples.length)} of {trap.recentFirings}</b>
+        </header>
+        {examples.map((example) => (
+          <button key={example.id} type="button">
+            <span>{formatRelativeGameDate(example.endTime)}</span>
+            <strong>{example.opponent || "Opponent"}</strong>
+            <em>ply</em>
+            <b>{example.moveNumber}</b>
+            <small>{formatAccurateReviewLoss(example)}</small>
+            <i>›</i>
+          </button>
+        ))}
+        {!examples.length && <div className="pc-pattern-recent-empty">No recent engine-reviewed firings.</div>}
+        {trap.recentFirings > examples.length && <button className="pc-pattern-see-all" type="button">See all {trap.recentFirings} firings →</button>}
+      </section>
+    </section>
+  );
+}
+
+function PatternBoard({ trap, detail = false }: { trap: PatternTrap; detail?: boolean }) {
+  return (
+    <div className={`pc-pattern-board ${detail ? "detail" : ""}`}>
+      <span className="pc-pattern-eval-chip">{trap.evalLabel}</span>
+      <DesignBoard
+        fen={trap.fen}
+        size={detail ? 313 : 313}
+        showAnalyze={false}
+        highlights={trap.highlights}
+        arrows={trap.arrows}
+        lastMove={trap.lastMove}
+      />
+    </div>
   );
 }
 
@@ -921,52 +1301,6 @@ function MobileMistakeLabSurface({
   );
 }
 
-function MobileMistakeBottomSheet({ children, close }: { children: ReactNode; close: () => void }) {
-  const [dragY, setDragY] = useState(0);
-  const [dragging, setDragging] = useState(false);
-  const dragStartY = useRef(0);
-
-  const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    dragStartY.current = event.clientY;
-    setDragging(true);
-    event.currentTarget.setPointerCapture(event.pointerId);
-  };
-  const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!dragging) return;
-    setDragY(Math.max(0, event.clientY - dragStartY.current));
-  };
-  const finishDrag = () => {
-    if (!dragging) return;
-    if (dragY > 96) close();
-    setDragging(false);
-    setDragY(0);
-  };
-
-  return (
-    <div className="pc-mobile-sheet-backdrop" role="presentation" onClick={close}>
-      <div
-        className={`pc-mobile-sheet ${dragging ? "dragging" : ""}`}
-        role="dialog"
-        aria-modal="true"
-        style={{ transform: dragY ? `translateY(${dragY}px)` : undefined }}
-        onClick={event => event.stopPropagation()}
-      >
-        <div
-          className="pc-mobile-sheet-drag-zone"
-          onPointerDown={startDrag}
-          onPointerMove={moveDrag}
-          onPointerUp={finishDrag}
-          onPointerCancel={finishDrag}
-          onPointerLeave={finishDrag}
-        >
-          <i className="pc-mobile-sheet-handle" />
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
 function MobileMistakeDetailSurface({ review, issue, detailView, setDetailView, back, startDrill, openAnalysis, game }: {
   review: MoveReview;
   issue: MoveIssue;
@@ -1055,7 +1389,7 @@ function MobileMistakeDetailSurface({ review, issue, detailView, setDetailView, 
   );
 }
 
-function MobileDrillSurface({ report, issues, issue, index, setIndex, candidate, setCandidate, bestMove, candidates, mode, setMode, openAnalysis }: {
+function MobileDrillSurface({ report, issues, issue, index, setIndex, candidate, setCandidate, bestMove, candidates, mode, setMode, openAnalysis, sortOrder, setSortOrder }: {
   report: AnalysisReport;
   issues: MoveIssue[];
   issue: MoveIssue;
@@ -1068,6 +1402,8 @@ function MobileDrillSurface({ report, issues, issue, index, setIndex, candidate,
   mode: "picker" | "session";
   setMode: (mode: "picker" | "session") => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: AnalysisOpenContext) => void;
+  sortOrder: "pressing" | "new" | "accuracy" | "quick";
+  setSortOrder: (order: "pressing" | "new" | "accuracy" | "quick") => void;
 }) {
   const [sessionPatternId, setSessionPatternId] = useState("all");
   const sessionIssues = useMemo(() => {
@@ -1113,7 +1449,14 @@ function MobileDrillSurface({ report, issues, issue, index, setIndex, candidate,
     <section className="pc-mobile-surface pc-mobile-drill-picker">
       <MobilePageHead eyebrow={`${Math.max(total, issues.length)} positions · ${patterns.length} patterns`} title="Drill" />
       <div className="pc-mobile-chip-row">
-        {["Most pressing", "New", "Low accuracy", "Quick (<2m)"].map((label, i) => <button key={label} className={i === 0 ? "active" : ""}>{label}</button>)}
+        {([
+          { id: "pressing" as const, label: "Most pressing" },
+          { id: "new" as const, label: "New" },
+          { id: "accuracy" as const, label: "Low accuracy" },
+          { id: "quick" as const, label: "Quick (<2m)" },
+        ]).map(({ id, label }) => (
+          <button key={id} className={sortOrder === id ? "active" : ""} onClick={() => setSortOrder(id)}>{label}</button>
+        ))}
       </div>
       <button className="pc-mobile-all-patterns" type="button" onClick={() => openSession("all")}>
         <div>
@@ -1187,7 +1530,7 @@ function MobileDrillSession({ issue, issues, index, setIndex, candidate, setCand
         <button type="button" aria-label="First position" onClick={() => setIndex(() => 0)}>⏮</button>
         <button type="button" aria-label="Previous position" onClick={() => setIndex(current => (current - 1 + Math.max(1, issues.length)) % Math.max(1, issues.length))}>◀</button>
         <button type="button" aria-label="Flip board" onClick={() => setFlipped(value => !value)}>⇅</button>
-        <button type="button" aria-label="Hint" onClick={() => { setHintOpen(value => !value); setCandidate(target); }}>✦</button>
+        <button type="button" aria-label="Hint" onClick={() => setHintOpen(value => !value)}>✦</button>
         <button type="button" aria-label="Next position" onClick={() => setIndex(current => (current + 1) % Math.max(1, issues.length))}>▶</button>
         <button type="button" aria-label="Last position" onClick={() => setIndex(() => Math.max(0, issues.length - 1))}>⏭</button>
       </div>
@@ -1645,7 +1988,7 @@ function MoveExplainerSheet({ state, close }: { state: MoveExplainerState; close
   const data = state.data;
   return (
     <div className="pc-explainer-backdrop" role="presentation" onClick={close}>
-      <section className="pc-explainer-sheet" role="dialog" aria-modal="true" aria-label="Move explanation" onClick={event => event.stopPropagation()}>
+      <section className="pc-explainer-sheet" role="dialog" aria-modal="true" aria-label="Move explanation" aria-live="polite" onClick={event => event.stopPropagation()}>
         <i className="pc-explainer-handle" />
         <header>
           <div><span>WHY</span><strong>{state.title || data?.title || "Move explanation"}</strong></div>
@@ -1786,6 +2129,277 @@ function buildMobilePatterns(report: AnalysisReport) {
     pct: Math.max(0.18, summary.displayTotal / max),
     tone: tones[i % tones.length],
   }));
+}
+
+function buildPatternPhaseStats(report: AnalysisReport, traps: PatternTrap[]) {
+  const trainable = getTrainableReviews(report);
+  return (["opening", "middlegame", "endgame"] as const).map(phase => {
+    const fromReviews = trainable.filter(review => review.phase === phase).length;
+    const fromTraps = traps.filter(trap => trap.phase === phase).reduce((sum, trap) => sum + trap.count, 0);
+    return {
+      phase,
+      label: phaseLabels[phase],
+      count: fromReviews || fromTraps || report.phaseTotals[phase] || 0,
+    };
+  });
+}
+
+function buildPatternTrapRows(report: AnalysisReport): PatternTrap[] {
+  const trainable = getTrainableReviews(report).filter(review => review.opening || review.issueIds.length);
+  if (!trainable.length) return [];
+
+  const groups = new Map<string, MoveReview[]>();
+  for (const review of trainable) {
+    const patternId = dominantPatternId([review]) || String(review.issueIds[0] || "engineMistake");
+    const key = [
+      review.phase,
+      patternId,
+      normalizeOpeningKey(review.opening || "Unclassified games"),
+    ].join(":");
+    const list = groups.get(key) || [];
+    list.push(review);
+    groups.set(key, list);
+  }
+
+  const rows = [...groups.entries()]
+    .map(([key, reviews]) => {
+      const orderedReviews = orderPatternReviews(reviews);
+      const first = orderedReviews[0];
+      const patternId = dominantPatternId(orderedReviews) || String(first.issueIds[0] || "engineMistake");
+      const issue = issueForReview(report, first, patternId) || undefined;
+      const summary = report.summaries.find(item => String(item.id) === patternId);
+      const opening = first.opening || "Unclassified games";
+      const openingKey = normalizeOpeningKey(opening);
+      const matchingGames = report.gameSummaries.filter(game => normalizeOpeningKey(game.opening || "") === openingKey);
+      const impactedGameIds = new Set(orderedReviews.map(review => review.gameId));
+      const visibleGames = matchingGames.length
+        ? matchingGames
+        : report.gameSummaries.filter(game => impactedGameIds.has(game.id));
+      const wins = visibleGames.filter(game => game.result === "win").length;
+      const winRate = visibleGames.length ? Math.round((wins / visibleGames.length) * 100) : 0;
+      const engineLosses = orderedReviews.map(accurateReviewLossCp).filter((loss): loss is number => typeof loss === "number");
+      const totalLossCp = engineLosses.length ? engineLosses.reduce((sum, loss) => sum + loss, 0) : null;
+      const averageLossCp = engineLosses.length ? totalLossCp! / engineLosses.length : null;
+      const bestMove = issue?.engineBestMove || first.engineBestMove || "";
+      const hasDifferentBestMove = Boolean(bestMove && !sameUciMove(bestMove, first.uci));
+      const cureAction = hasDifferentBestMove ? "Play" : "Review";
+      const cureMove = hasDifferentBestMove
+        ? formatMoveSan(first.fenBefore, bestMove) || formatUci(bestMove) || "this position in analysis"
+        : "this position in analysis";
+      const title = patternDetailTitle(summary?.title || first.title || "Recurring pattern");
+      const game = report.gameSummaries.find(item => item.id === first.gameId);
+      const reply = game ? nextMoveAfterReview(game, first) : null;
+      const playedSquares = squaresForUci(first.uci);
+      const replySquares = squaresForUci(reply?.uci);
+      const bestSquares = squaresForUci(bestMove);
+      const highlights: Record<string, string> = {};
+      if (playedSquares) {
+        highlights[playedSquares.from] = "them";
+        highlights[playedSquares.to] = "them";
+      }
+      if (bestSquares) {
+        highlights[bestSquares.from] = "idea";
+        highlights[bestSquares.to] = "idea";
+      }
+      const arrows: DesignArrow[] = [];
+      if (playedSquares) arrows.push({ ...playedSquares, kind: "them" });
+      if (bestSquares) arrows.push({ ...bestSquares, kind: "idea" });
+      const streak = patternStreaks(report, orderedReviews);
+      const recentTimeline = patternRecentTimeline(report, orderedReviews);
+      const recentFirings = recentTimeline.filter(Boolean).length;
+      const cueCopy = reply?.san
+        ? `their ${reply.san} reply is available`
+        : `move ${first.moveNumber}: ${first.san} is tempting`;
+      const cureNote = bestMove
+        ? hasDifferentBestMove ? "- engine-preferred prevention" : "- engine is reviewing this spot"
+        : "- open analysis for the exact engine line";
+
+      return {
+        key,
+        patternId,
+        opening,
+        title,
+        phase: first.phase,
+        count: orderedReviews.length,
+        gameCount: visibleGames.length || impactedGameIds.size,
+        winRate,
+        averageLossCp,
+        totalLossCp,
+        engineReviewedCount: engineLosses.length,
+        cleanGames: streak.cleanGames,
+        lastReset: streak.lastReset,
+        personalBest: streak.personalBest,
+        recentFirings,
+        recentTimeline,
+        fen: first.fenBefore,
+        evalLabel: formatLossCp(averageLossCp),
+        cueCopy,
+        cureAction,
+        cureMove,
+        cureNote,
+        trigger: patternTriggerCopy(title, orderedReviews, engineLosses.length),
+        insight: issue?.explanation || first.explanation || "This pattern repeats in the selected phase.",
+        highlights,
+        arrows,
+        lastMove: playedSquares,
+        formation: buildPatternFormation(report, first),
+        issue,
+        reviews: orderedReviews,
+      } satisfies PatternTrap;
+    })
+    .sort((a, b) =>
+      phaseSortWeight(a.phase) - phaseSortWeight(b.phase) ||
+      (b.totalLossCp ?? 0) - (a.totalLossCp ?? 0) ||
+      b.count - a.count
+    );
+
+  return rows;
+}
+
+function dominantPatternId(reviews: MoveReview[]) {
+  const counts = new Map<string, number>();
+  for (const review of reviews) {
+    for (const id of review.issueIds) counts.set(String(id), (counts.get(String(id)) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+}
+
+function orderPatternReviews(reviews: MoveReview[]) {
+  return reviews.slice().sort((a, b) => {
+    const timeDelta = (b.endTime ?? b.gameId) - (a.endTime ?? a.gameId);
+    if (timeDelta !== 0) return timeDelta;
+    const lossDelta = (accurateReviewLossCp(b) ?? -1) - (accurateReviewLossCp(a) ?? -1);
+    if (lossDelta !== 0) return lossDelta;
+    return b.severity - a.severity;
+  });
+}
+
+function accurateReviewLossCp(review: MoveReview) {
+  if (typeof review.engineEvalLoss === "number") return Math.max(0, review.engineEvalLoss);
+  if (typeof review.engineEvalBefore === "number" && typeof review.engineEvalAfter === "number") {
+    const playerSign = review.color === "white" ? 1 : -1;
+    return Math.max(0, (review.engineEvalBefore - review.engineEvalAfter) * playerSign);
+  }
+  return null;
+}
+
+function formatLossCp(loss: number | null) {
+  if (loss === null) return "pending";
+  if (!loss || loss <= 0) return "0.0";
+  if (isMateLikeCp(loss)) return "-M";
+  if (loss >= 3000) return "-30+";
+  const pawns = Math.max(0.1, loss / 100);
+  return `-${pawns.toFixed(loss >= 1000 ? 0 : 1)}`;
+}
+
+function formatAccurateReviewLoss(review: MoveReview) {
+  return formatLossCp(accurateReviewLossCp(review));
+}
+
+function patternLossPct(trap: PatternTrap, traps: PatternTrap[]) {
+  const maxLoss = Math.max(1, ...traps.map(item => item.totalLossCp ?? 0));
+  return clampNumber(((trap.totalLossCp ?? 0) / maxLoss) * 100, 8, 100);
+}
+
+function patternStreaks(report: AnalysisReport, reviews: MoveReview[]) {
+  const firingGameIds = new Set(reviews.map(review => review.gameId));
+  const games = chronologicalGames(report).filter(game => game.id);
+  let current = 0;
+  let personalBest = 0;
+  let lastReset = "";
+
+  for (const game of games) {
+    if (firingGameIds.has(game.id)) {
+      personalBest = Math.max(personalBest, current);
+      current = 0;
+      lastReset = formatGameDate(game.endTime);
+    } else {
+      current += 1;
+    }
+  }
+
+  personalBest = Math.max(personalBest, current);
+  return {
+    cleanGames: current,
+    personalBest,
+    lastReset: lastReset || "Never",
+  };
+}
+
+function patternRecentTimeline(report: AnalysisReport, reviews: MoveReview[]) {
+  const firingGameIds = new Set(reviews.map(review => review.gameId));
+  const recentGames = chronologicalGames(report).slice(-30);
+  return recentGames.length
+    ? recentGames.map(game => firingGameIds.has(game.id))
+    : reviews.slice(-30).map(() => true);
+}
+
+function chronologicalGames(report: AnalysisReport) {
+  return report.gameSummaries.slice().sort((a, b) =>
+    (a.endTime ?? a.id) - (b.endTime ?? b.id)
+  );
+}
+
+function buildPatternFormation(report: AnalysisReport, review: MoveReview): PatternFormationStep[] {
+  const game = report.gameSummaries.find(item => item.id === review.gameId);
+  const fallback: PatternFormationStep = {
+    ply: String(review.moveNumber),
+    label: review.san || "Position",
+    fen: review.fenBefore,
+    lastMove: null,
+  };
+  if (!game?.pgn) return [fallback];
+
+  const timeline = buildGameTimeline(game, []);
+  const playedIndex = timeline.findIndex(move =>
+    comparableFen(move.fenBefore) === comparableFen(review.fenBefore) &&
+    move.uci === review.uci
+  );
+  if (playedIndex < 0) return [fallback];
+
+  return timeline
+    .slice(Math.max(0, playedIndex - 3), playedIndex + 1)
+    .map(move => ({
+      ply: String(move.ply),
+      label: move.san || formatUci(move.uci) || "Move",
+      fen: move.fenAfter,
+      lastMove: move.lastMove,
+    }));
+}
+
+function patternTriggerCopy(title: string, reviews: MoveReview[], engineReviewedCount: number) {
+  const cleaned = title.replace(/\.$/, "").trim() || "This pattern";
+  const spots = `${reviews.length} ${reviews.length === 1 ? "spot" : "spots"}`;
+  const engine = engineReviewedCount === reviews.length
+    ? "engine-reviewed"
+    : `${engineReviewedCount}/${reviews.length} engine-reviewed`;
+  return `${cleaned} appears in ${spots} from this report (${engine}).`;
+}
+
+function patternTitleForReview(report: AnalysisReport, review: MoveReview) {
+  const id = review.issueIds[0];
+  return report.summaries.find(summary => String(summary.id) === String(id))?.title || review.title;
+}
+
+function normalizeOpeningKey(value: string) {
+  const base = value
+    .replace(/^[A-E][0-9]{2}\s+/i, "")
+    .replace(/\s*\([^)]*\)\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return stableSlug(base || "imported-games");
+}
+
+function stableSlug(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "item";
+}
+
+function patternDetailTitle(title: string) {
+  return title.replace(/\.$/, "").trim() || "Pattern detail";
 }
 
 function buildDrillPatternCatalog(report: AnalysisReport, issues: MoveIssue[]) {
@@ -2209,6 +2823,11 @@ function squaresForUci(uci?: string) {
   return { from: uci.slice(0, 2), to: uci.slice(2, 4) };
 }
 
+function sameUciMove(left?: string, right?: string) {
+  if (!left || !right) return false;
+  return left.slice(0, 5).toLowerCase() === right.slice(0, 5).toLowerCase();
+}
+
 function patternHeadline(title: string): ReactNode {
   const lower = title.toLowerCase();
   if (lower.includes("repl") || lower.includes("forcing")) return <>You move <i>before</i> seeing the reply.</>;
@@ -2269,7 +2888,7 @@ function clampNumber(value: number, min: number, max: number) {
 
 function Frame({ children, nav, setActiveView, openProfile, report }: {
   children: ReactNode;
-  nav: "dashboard" | "games" | "lab" | "drill" | "analysis";
+  nav: "dashboard" | "games" | "lab" | "patterns" | "drill" | "analysis";
   setActiveView: (view: AppView) => void | undefined;
   openProfile?: () => void;
   report?: AnalysisReport;
@@ -2283,7 +2902,7 @@ function Frame({ children, nav, setActiveView, openProfile, report }: {
 }
 
 function NavRail({ active, setActiveView, openProfile, report }: {
-  active: "dashboard" | "games" | "lab" | "drill" | "analysis";
+  active: "dashboard" | "games" | "lab" | "patterns" | "drill" | "analysis";
   setActiveView: (view: AppView) => void | undefined;
   openProfile?: () => void;
   report?: AnalysisReport;
@@ -2292,6 +2911,7 @@ function NavRail({ active, setActiveView, openProfile, report }: {
     { id: "dashboard", label: "Dashboard", icon: "◎", view: "dashboard" },
     { id: "games", label: "Games", icon: "□", view: "games" },
     { id: "lab", label: "Mistake Lab", icon: "◇", view: "mistakes" },
+    { id: "patterns", label: "Patterns", icon: "▥", view: "patterns" },
     { id: "drill", label: "Drill", icon: "△", view: "drill" },
     { id: "analysis", label: "Analysis", icon: "◯", view: "analysis" },
   ] as const;
@@ -2583,7 +3203,7 @@ function PatternHeader({ summaries, activeId }: { summaries: AnalysisReport["sum
   );
 }
 
-function MistakeRow({ review, selected, onClick }: { review: MoveReview; issue: MoveIssue | null; selected: boolean; onClick: () => void }) {
+function MistakeRow({ review, selected, onClick }: { review: MoveReview; selected: boolean; onClick: () => void }) {
   return (
     <button className={`pc-mistake-row quality-${qualityClass(review.quality)} ${selected ? "active" : ""}`} onClick={onClick}>
       <div>
@@ -2786,9 +3406,22 @@ function SectionHead({ eyebrow, meta, action }: { eyebrow: string; meta?: string
 }
 
 function StatusOverlay() {
+  const [time, setTime] = useState(() => {
+    const now = new Date();
+    return `${now.getHours()}:${String(now.getMinutes()).padStart(2, "0")}`;
+  });
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = new Date();
+      setTime(`${now.getHours()}:${String(now.getMinutes()).padStart(2, "0")}`);
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   return (
     <header className="pc-status">
-      <span>9:41</span>
+      <span>{time}</span>
       <div><i /><i /><i /><b /></div>
     </header>
   );
@@ -2798,26 +3431,32 @@ function HomeIndicator() {
   return <div className="pc-home-indicator"><i /></div>;
 }
 
-function MobileTabBar({ activeView, analysisReturnView, setActiveView, openProfile }: {
+function MobileTabBar({ activeView, analysisReturnView, setActiveView, openMenu, openProfile }: {
   activeView: AppView;
   analysisReturnView: Exclude<AppView, "analysis">;
   setActiveView: (view: AppView) => void;
+  openMenu: () => void;
   openProfile: () => void;
 }) {
   const tabs = [
     { id: "dashboard", label: "Home", icon: MobileHomeIcon },
     { id: "games", label: "Games", icon: MobileGamesIcon },
     { id: "mistakes", label: "Lab", icon: MobileLabIcon },
+    { id: "patterns", label: "Patterns", icon: MobilePatternsIcon },
     { id: "drill", label: "Drill", icon: MobileDrillIcon },
   ] as const;
   return (
     <nav className="pc-tabbar">
       {tabs.map(({ id, label, icon: Icon }) => (
-        <button key={id} className={activeView === id || (activeView === "analysis" && analysisReturnView === id) ? "active" : ""} onClick={() => setActiveView(id)}>
+        <button
+          key={id}
+          className={activeView === id || (activeView === "analysis" && analysisReturnView === id) ? "active" : ""}
+          onClick={() => setActiveView(id)}
+        >
           <Icon size={20} /><span>{label}</span>
         </button>
       ))}
-      <button type="button" onClick={openProfile}><MobileMeIcon size={20} /><span>Me</span></button>
+      <button type="button" onClick={openMenu}><MobileMeIcon size={20} /><span>Menu</span></button>
     </nav>
   );
 }
@@ -2854,6 +3493,15 @@ function MobileDrillIcon({ size = 20 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 20 20" fill="none" aria-hidden="true">
       <path d="M4 4 L16 4 L10 16 Z" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+function MobilePatternsIcon({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path d="M4 15 L4 5 M8 15 L8 8 M12 15 L12 4 M16 15 L16 10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <path d="M3 15.5 H17" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
     </svg>
   );
 }
@@ -3182,6 +3830,14 @@ function gameHeaders(pgn: string) {
 
 function formatGameDate(endTime?: number) {
   return endTime ? new Date(endTime * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "PGN";
+}
+
+function formatRelativeGameDate(endTime?: number) {
+  if (!endTime) return "PGN";
+  const days = Math.max(0, Math.floor((Date.now() - endTime * 1000) / 86_400_000));
+  if (days <= 0) return "today";
+  if (days < 14) return `${days}d ago`;
+  return formatGameDate(endTime);
 }
 
 function cleanDisplayName(name: string) {

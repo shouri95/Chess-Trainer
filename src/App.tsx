@@ -1,4 +1,4 @@
-import { Component, ReactNode, useEffect, useRef, useState } from "react";
+import { Component, ReactNode, useCallback, useEffect, useRef, useState, useTransition } from "react";
 import {
   AlertTriangle,
   FileUp,
@@ -57,17 +57,22 @@ type AnalysisStart = {
 };
 
 type ShellProps = {
-  activeView: "dashboard" | "games" | "mistakes" | "drill" | "analysis";
-  setActiveView: (view: "dashboard" | "games" | "mistakes" | "drill" | "analysis") => void;
-  analysisReturnView: "dashboard" | "games" | "mistakes" | "drill";
+  activeView: "dashboard" | "games" | "mistakes" | "patterns" | "drill" | "analysis";
+  setActiveView: (view: "dashboard" | "games" | "mistakes" | "patterns" | "drill" | "analysis") => void;
+  analysisReturnView: "dashboard" | "games" | "mistakes" | "patterns" | "drill";
   report: AnalysisReport;
   username: string;
   syncMeta?: SyncMeta;
   analysisStart?: AnalysisStart | null;
   openProfile: () => void;
+  openMenu: () => void;
   startDrill: (quality?: MoveReviewQuality | "all", patternId?: string, issue?: MoveIssue) => void;
   openAnalysis: (fen?: string, flipped?: boolean, title?: string, context?: { gamePgn?: string; returnMistakeReviewId?: string }) => void;
   openGame: (gameId: number) => void;
+  selectedGameId: number | null;
+  drillQuality: MoveReviewQuality | "all";
+  drillPatternId: string;
+  drillIssue: MoveIssue | null;
 };
 
 // ── helpers ────────────────────────────────────────────────
@@ -396,12 +401,20 @@ function ProfileSheet({
   forgetProfile: () => void;
   close: () => void;
 }) {
+  const [fileError, setFileError] = useState(false);
   const statusName = username.trim() || connectedUsername;
   const draftIsConnected = sameChessComUsername(statusName, connectedUsername);
   const profileSyncStatus = friendlySyncMessage(progress?.label || syncMeta.message) || "";
   const isAnalyzing = Boolean(progress?.label.toLowerCase().startsWith("analyzing"));
   const profileSyncPercent =
     progress?.total && !isAnalyzing ? Math.round((progress.done / progress.total) * 100) : null;
+
+  useEffect(() => {
+    if (fileError) {
+      const timer = window.setTimeout(() => setFileError(false), 4000);
+      return () => window.clearTimeout(timer);
+    }
+  }, [fileError]);
   return (
     <div className="profile-overlay" role="dialog" aria-modal="true" onClick={close}>
       <div className="profile-sheet" onClick={(e) => e.stopPropagation()}>
@@ -500,7 +513,11 @@ function ProfileSheet({
             {loading ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />} Sync{" "}
             {timeClass === "all" ? "Chess.com" : timeClass} games
           </button>
-          <button className="ghost-button profile-sync" onClick={forgetProfile}>
+          <button className="ghost-button profile-sync" onClick={() => {
+            if (window.confirm("Forget this profile and all saved data? This cannot be undone.")) {
+              forgetProfile();
+            }
+          }}>
             Forget profile
           </button>
         </section>
@@ -525,7 +542,7 @@ function ProfileSheet({
                   const file = e.target.files?.[0];
                   if (!file) return;
                   if (file.size > 5 * 1024 * 1024) {
-                    handleFileTooLarge();
+                    setFileError(true);
                     e.currentTarget.value = "";
                     return;
                   }
@@ -538,6 +555,7 @@ function ProfileSheet({
             <button className="ghost-button" onClick={loadSample}>
               Load sample
             </button>
+            {fileError && <div className="inline-error" style={{ marginTop: "8px", padding: "8px 12px", background: "rgba(220,38,38,0.12)", borderRadius: "8px", color: "#fca5a5", fontSize: "0.85rem" }}>Please choose a PGN under 5 MB.</div>}
           </div>
         </details>
       </div>
@@ -629,20 +647,6 @@ function ProgressRing({ value }: { value: number }) {
   );
 }
 
-function handleFileTooLarge() {
-  const el = document.getElementById("file-too-large-msg");
-  if (!el) {
-    const msg = document.createElement("div");
-    msg.id = "file-too-large-msg";
-    msg.className = "inline-error";
-    msg.textContent = "Please choose a PGN under 5 MB.";
-    msg.style.cssText = "margin-top:8px;padding:8px 12px;background:rgba(220,38,38,0.12);border-radius:8px;color:#fca5a5;font-size:0.85rem;";
-    const fileSection = document.querySelector(".pgn-drawer .button-row");
-    fileSection?.after(msg);
-    setTimeout(() => msg.remove(), 4000);
-  }
-}
-
 // ── error boundary ────────────────────────────────────────
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -682,14 +686,19 @@ export default function App() {
   const [progress, setProgress] = useState<ImportProgress | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [activeView, setActiveView] = useState<"dashboard" | "games" | "mistakes" | "drill" | "analysis">("dashboard");
-  const [analysisReturnView, setAnalysisReturnView] = useState<"dashboard" | "games" | "mistakes" | "drill">("dashboard");
+  const [activeView, setActiveView] = useState<"dashboard" | "games" | "mistakes" | "patterns" | "drill" | "analysis">("dashboard");
+  const [analysisReturnView, setAnalysisReturnView] = useState<"dashboard" | "games" | "mistakes" | "patterns" | "drill">("dashboard");
   const [analysisStart, setAnalysisStart] = useState<AnalysisStart | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [profileHydrated, setProfileHydrated] = useState(false);
   const [connectedUsername, setConnectedUsername] = useState("");
   const [syncMeta, setSyncMeta] = useState<SyncMeta>({ status: "idle" });
+  const [drillQuality, setDrillQuality] = useState<MoveReviewQuality | "all">("all");
+  const [drillPatternId, setDrillPatternId] = useState("all");
+  const [drillIssue, setDrillIssue] = useState<MoveIssue | null>(null);
+  const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
+  const [, startTransition] = useTransition();
 
   const { analyzeMovePair } = useStockfish();
   const analysisAbortRef = useRef<AbortController | null>(null);
@@ -711,7 +720,9 @@ export default function App() {
     if (!fen) return;
     if (activeView !== "analysis") setAnalysisReturnView(activeView);
     setAnalysisStart({ fen, flipped, title, ...context });
-    setActiveView("analysis");
+    startTransition(() => {
+      setActiveView("analysis");
+    });
   };
 
   // ── hydration ──
@@ -1105,16 +1116,23 @@ export default function App() {
     }
   }
 
-  const navigateView = (view: "dashboard" | "games" | "mistakes" | "drill" | "analysis") => {
+  const navigateView = (view: "dashboard" | "games" | "mistakes" | "patterns" | "drill" | "analysis") => {
     setProfileOpen(false);
     setMenuOpen(false);
-    setActiveView(view);
+    if (view !== "games") setSelectedGameId(null);
+    startTransition(() => {
+      setActiveView(view);
+    });
   };
 
   const startDrill = (quality: MoveReviewQuality | "all" = "all", patternId = "all", issue?: MoveIssue) => {
     if (issue) setSelectedIssue(issue);
-    setActiveView("drill");
-    // The drill page in ExactMobileShell manages its own quality/pattern filters
+    setDrillQuality(quality);
+    setDrillPatternId(patternId);
+    setDrillIssue(issue || null);
+    startTransition(() => {
+      setActiveView("drill");
+    });
   };
 
   // ── render ──
@@ -1128,12 +1146,19 @@ export default function App() {
     syncMeta,
     analysisStart,
     openProfile: () => setProfileOpen(true),
+    openMenu: () => setMenuOpen(true),
     startDrill,
     openAnalysis,
     openGame: (gameId: number) => {
-      // game selection is handled inside the mobile shell
-      setActiveView("games");
+      setSelectedGameId(gameId);
+      startTransition(() => {
+        setActiveView("games");
+      });
     },
+    selectedGameId,
+    drillQuality,
+    drillPatternId,
+    drillIssue,
   };
 
   return (
@@ -1149,9 +1174,14 @@ export default function App() {
             syncMeta={shellProps.syncMeta}
             analysisStart={shellProps.analysisStart}
             openProfile={shellProps.openProfile}
+            openMenu={shellProps.openMenu}
             startDrill={shellProps.startDrill}
             openAnalysis={shellProps.openAnalysis}
             openGame={shellProps.openGame}
+            selectedGameId={shellProps.selectedGameId}
+            drillQuality={shellProps.drillQuality}
+            drillPatternId={shellProps.drillPatternId}
+            drillIssue={shellProps.drillIssue}
           />
         ) : (
           <ExactMobileImport

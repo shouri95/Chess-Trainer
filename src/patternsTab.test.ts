@@ -1,0 +1,148 @@
+import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+
+const shell = readFileSync("src/ExactMobileShell.tsx", "utf8");
+const app = readFileSync("src/App.tsx", "utf8");
+const styles = readFileSync("src/styles.css", "utf8");
+
+const patternsBlock = shell.slice(shell.indexOf("type PatternTrap"), shell.indexOf("function AnalysisPage"));
+const builderBlock = shell.slice(shell.indexOf("function buildPatternPhaseStats"), shell.indexOf("function buildDrillPatternCatalog"));
+
+type Check = [string, () => void];
+
+const checks: Check[] = [
+  ["App shell active view includes patterns", () => expect(app).toContain('"patterns" | "drill" | "analysis"')],
+  ["analysis return view includes patterns", () => expect(app).toContain('"mistakes" | "patterns" | "drill"')],
+  ["navigateView accepts patterns", () => expect(app).toContain('"mistakes" | "patterns" | "drill" | "analysis"')],
+  ["mobile AppView includes patterns", () => expect(shell).toContain('"mistakes" | "patterns" | "drill"')],
+  ["Patterns state stores selected trap", () => expect(shell).toContain("mobilePatternTrap")],
+  ["dashboard pattern cards open Patterns view", () => expect(shell).toContain('setActiveView("patterns")')],
+  ["Patterns tab clears trap detail", () => expect(shell).toContain("openPatternsHome")],
+  ["Patterns render branch exists", () => expect(shell).toContain('activeView === "patterns"')],
+  ["Patterns bottom nav item is present", () => expect(shell).toContain('{ id: "patterns", label: "Patterns"')],
+  ["Patterns tab icon is present", () => expect(shell).toContain("function MobilePatternsIcon")],
+
+  ["PatternsPage is implemented", () => expect(patternsBlock).toContain("function PatternsPage")],
+  ["PatternOverview is implemented", () => expect(patternsBlock).toContain("function PatternOverview")],
+  ["PatternTrapDetail is implemented", () => expect(patternsBlock).toContain("function PatternTrapDetail")],
+  ["PatternBoard is implemented", () => expect(patternsBlock).toContain("function PatternBoard")],
+  ["PatternTrap stores actual reviews", () => expect(patternsBlock).toContain("reviews: MoveReview[]")],
+  ["PatternTrap stores engine reviewed count", () => expect(patternsBlock).toContain("engineReviewedCount: number")],
+  ["PatternTrap stores recent game timeline", () => expect(patternsBlock).toContain("recentTimeline: boolean[]")],
+  ["PatternsPage builds traps from report", () => expect(patternsBlock).toContain("buildPatternTrapRows(report)")],
+  ["PatternsPage selects trap by key or pattern id", () => expect(patternsBlock).toContain("trap.key === selectedTrapKey || trap.patternId === selectedTrapKey")],
+  ["Patterns overview title matches tab name", () => expect(patternsBlock).toContain("<h1>Patterns</h1>")],
+
+  ["phase state is tracked", () => expect(patternsBlock).toContain('useState<Phase>("opening")')],
+  ["phase tabs render all phase stats", () => expect(patternsBlock).toContain("phaseStats.map(stat")],
+  ["phase tabs update active phase", () => expect(patternsBlock).toContain("setActivePhase(stat.phase)")],
+  ["visible traps are filtered by phase", () => expect(patternsBlock).toContain("traps.filter(trap => trap.phase === activePhase)")],
+  ["overview auto-selects first phase with data", () => expect(patternsBlock).toContain("nextPhase && nextPhase !== activePhase")],
+  ["overview lead board changes by phase", () => expect(patternsBlock).toContain("const leadTrap = visibleTraps[0]")],
+  ["overview count uses actual report games", () => expect(patternsBlock).toContain("{report.games} games")],
+  ["overview detects real opening metadata", () => expect(patternsBlock).toContain("const hasOpeningBreakdown")],
+  ["overview falls back to pattern grouping without opening metadata", () => expect(patternsBlock).toContain('hasOpeningBreakdown ? "By opening" : "By pattern"')],
+  ["overview loss strip shows engine review coverage", () => expect(patternsBlock).toContain("engine reviewed")],
+  ["overview loss strip supports pending engine data", () => expect(patternsBlock).toContain('"pending"')],
+  ["overview empty state is rendered", () => expect(patternsBlock).toContain("pc-pattern-empty-state")],
+  ["overview drill starts selected pattern", () => expect(patternsBlock).toContain('startDrill("all", leadTrap.patternId, leadTrap.issue)')],
+
+  ["detail title uses trap title", () => expect(patternsBlock).toContain("<h1>{trap.title}</h1>")],
+  ["detail opening uses trap opening", () => expect(patternsBlock).toContain("<span>{trap.opening}</span>")],
+  ["detail games stat uses real game count", () => expect(patternsBlock).toContain("<strong>{trap.gameCount}</strong>")],
+  ["detail win stat uses real win rate", () => expect(patternsBlock).toContain("<strong>{trap.winRate}%</strong>")],
+  ["detail avg loss uses engine eval label", () => expect(patternsBlock).toContain("<strong>{trap.evalLabel}</strong>")],
+  ["detail board uses PatternBoard", () => expect(patternsBlock).toContain("<PatternBoard trap={trap} detail />")],
+  ["detail cue uses generated cue copy", () => expect(patternsBlock).toContain("{trap.cueCopy}")],
+  ["detail cue uses dynamic action verb", () => expect(patternsBlock).toContain("{trap.cureAction}")],
+  ["detail cue uses engine cure move", () => expect(patternsBlock).toContain("{trap.cureMove}")],
+  ["detail formation maps actual positions", () => expect(patternsBlock).toContain("trap.formation.map(step")],
+  ["detail recent firings map actual reviews", () => expect(patternsBlock).toContain("trap.reviews.slice(0, 3)")],
+  ["recent firings use accurate eval labels", () => expect(patternsBlock).toContain("formatAccurateReviewLoss(example)")],
+  ["recent empty state is rendered", () => expect(patternsBlock).toContain("No recent engine-reviewed firings.")],
+  ["streak rail maps recent timeline", () => expect(patternsBlock).toContain("trap.recentTimeline.map")],
+  ["detail drill count is dynamic", () => expect(patternsBlock).toContain("Math.min(20, Math.max(1, trap.count))")],
+
+  ["PatternBoard overlays eval chip", () => expect(patternsBlock).toContain('className="pc-pattern-eval-chip"')],
+  ["PatternBoard eval chip uses trap eval label", () => expect(patternsBlock).toContain("{trap.evalLabel}</span>")],
+  ["PatternBoard uses trap fen", () => expect(patternsBlock).toContain("fen={trap.fen}")],
+  ["PatternBoard uses trap highlights", () => expect(patternsBlock).toContain("highlights={trap.highlights}")],
+  ["PatternBoard uses trap arrows", () => expect(patternsBlock).toContain("arrows={trap.arrows}")],
+  ["PatternBoard uses trap last move", () => expect(patternsBlock).toContain("lastMove={trap.lastMove}")],
+  ["PatternBoard size is app-scale", () => expect(patternsBlock).toContain("size={detail ? 313 : 313}")],
+
+  ["pattern trap rows builder exists", () => expect(builderBlock).toContain("function buildPatternTrapRows")],
+  ["phase stats builder exists", () => expect(builderBlock).toContain("function buildPatternPhaseStats")],
+  ["phase stats use trainable reviews", () => expect(builderBlock).toContain("getTrainableReviews(report)")],
+  ["trap rows return empty without trainable data", () => expect(builderBlock).toContain("if (!trainable.length) return []")],
+  ["trap rows group by phase", () => expect(builderBlock).toContain("review.phase")],
+  ["trap rows group by dominant pattern", () => expect(builderBlock).toContain("dominantPatternId([review])")],
+  ["trap rows group by normalized opening", () => expect(builderBlock).toContain("normalizeOpeningKey(review.opening")],
+  ["opening normalizer keeps real opening names", () => expect(builderBlock).toContain("replace(/^[A-E][0-9]{2}\\s+/i")],
+  ["trap rows use report game summaries", () => expect(builderBlock).toContain("report.gameSummaries.filter")],
+  ["win rate uses visible games", () => expect(builderBlock).toContain("visibleGames.filter(game => game.result === \"win\")")],
+  ["losses use accurate engine eval helper", () => expect(builderBlock).toContain("orderedReviews.map(accurateReviewLossCp)")],
+  ["total loss can be null when engine is pending", () => expect(builderBlock).toContain("const totalLossCp = engineLosses.length ?")],
+  ["average loss can be null when engine is pending", () => expect(builderBlock).toContain("const averageLossCp = engineLosses.length ?")],
+  ["best move comes from issue or review", () => expect(builderBlock).toContain("issue?.engineBestMove || first.engineBestMove")],
+  ["cure move only shows a different engine move", () => expect(builderBlock).toContain("hasDifferentBestMove")],
+  ["cure move compares engine move with played move", () => expect(shell).toContain("function sameUciMove")],
+  ["cure action falls back to review", () => expect(builderBlock).toContain('const cureAction = hasDifferentBestMove ? "Play" : "Review"')],
+  ["reply cue comes from game timeline", () => expect(builderBlock).toContain("nextMoveAfterReview(game, first)")],
+  ["board highlights use played move squares", () => expect(builderBlock).toContain("highlights[playedSquares.from]")],
+  ["board highlights use best move squares", () => expect(builderBlock).toContain("highlights[bestSquares.from]")],
+  ["board arrows include played move", () => expect(builderBlock).toContain('kind: "them"')],
+  ["board arrows include engine idea", () => expect(builderBlock).toContain('kind: "idea"')],
+  ["streaks are calculated from report", () => expect(builderBlock).toContain("patternStreaks(report, orderedReviews)")],
+  ["recent timeline is calculated from report", () => expect(builderBlock).toContain("patternRecentTimeline(report, orderedReviews)")],
+  ["recent firings are derived from timeline", () => expect(builderBlock).toContain("recentTimeline.filter(Boolean).length")],
+  ["formation is built from game data", () => expect(builderBlock).toContain("buildPatternFormation(report, first)")],
+  ["trigger copy mentions engine coverage", () => expect(builderBlock).toContain("patternTriggerCopy(title, orderedReviews, engineLosses.length)")],
+  ["rows are sorted by phase", () => expect(builderBlock).toContain("phaseSortWeight(a.phase) - phaseSortWeight(b.phase)")],
+  ["rows are sorted by engine loss", () => expect(builderBlock).toContain("(b.totalLossCp ?? 0) - (a.totalLossCp ?? 0)")],
+
+  ["accurateReviewLossCp uses engineEvalLoss", () => expect(builderBlock).toContain("typeof review.engineEvalLoss === \"number\"")],
+  ["accurateReviewLossCp computes before after swing", () => expect(builderBlock).toContain("review.engineEvalBefore - review.engineEvalAfter")],
+  ["accurateReviewLossCp returns null without engine data", () => expect(builderBlock).toContain("return null")],
+  ["formatLossCp renders pending", () => expect(builderBlock).toContain('if (loss === null) return "pending"')],
+  ["formatLossCp renders mate", () => expect(builderBlock).toContain('if (isMateLikeCp(loss)) return "-M"')],
+  ["formatLossCp caps decisive non-mate swings", () => expect(builderBlock).toContain('if (loss >= 3000) return "-30+"')],
+  ["formatAccurateReviewLoss exists", () => expect(builderBlock).toContain("function formatAccurateReviewLoss")],
+  ["pattern loss percentage is clamped", () => expect(builderBlock).toContain("clampNumber(((trap.totalLossCp ?? 0) / maxLoss) * 100, 8, 100)")],
+  ["streaks use firing game ids", () => expect(builderBlock).toContain("new Set(reviews.map(review => review.gameId))")],
+  ["streaks use chronological games", () => expect(builderBlock).toContain("chronologicalGames(report)")],
+  ["recent timeline uses last 30 games", () => expect(builderBlock).toContain(".slice(-30)")],
+  ["formation uses buildGameTimeline", () => expect(builderBlock).toContain("const timeline = buildGameTimeline(game, [])")],
+  ["formation labels use actual SAN", () => expect(builderBlock).toContain("label: move.san")],
+  ["pattern detail title preserves supplied title", () => expect(builderBlock).toContain('return title.replace(/\\.$/, "").trim() || "Pattern detail"')],
+
+  ["Patterns block has no reference trap rows", () => expect(patternsBlock).not.toContain("referenceTrapRows")],
+  ["Patterns block has no reference trap FEN", () => expect(patternsBlock).not.toContain("referenceTrapFen")],
+  ["Patterns block has no demo opponent", () => expect(patternsBlock).not.toContain("NightForge_99")],
+  ["Patterns block has no hardcoded Caro-Kann row", () => expect(patternsBlock).not.toContain("Caro-Kann")],
+  ["Patterns block has no 90 day fake window", () => expect(patternsBlock).not.toContain("90 days")],
+  ["Patterns block has no d4 fallback title", () => expect(patternsBlock).not.toContain("The d4 outpost")],
+
+  ["bottom tabbar uses six columns", () => expect(styles).toContain("grid-template-columns: repeat(6, minmax(0, 1fr));")],
+  ["patterns overview class is styled", () => expect(styles).toContain(".pc-patterns-overview.pc-mobile-surface")],
+  ["patterns trap detail class is styled", () => expect(styles).toContain(".pc-pattern-trap-detail.pc-mobile-surface")],
+  ["overview title is app-scale", () => expect(styles).toContain("font-size: 1.95rem;")],
+  ["detail title is app-scale", () => expect(styles).toContain("font-size: 1.9rem;")],
+  ["phase tabs are compact", () => expect(styles).toContain("min-height: 42px;")],
+  ["phase tabs use centered layout", () => expect(styles).toContain("justify-content: center;")],
+  ["pattern board is 313px scale", () => expect(styles).toContain("--pc-board-size: min(313px, calc(100vw - 58px)) !important;")],
+  ["pattern eval chip is absolute", () => expect(styles).toContain(".pc-pattern-eval-chip")],
+  ["pattern eval chip top left", () => expect(styles).toContain("top: 8px;")],
+  ["pattern loss strip is styled", () => expect(styles).toContain(".pc-pattern-loss-strip")],
+  ["detail stats are compact", () => expect(styles).toContain("min-height: 50px;")],
+  ["spark rail fired state is styled", () => expect(styles).toContain(".pc-pattern-spark-rail i.fired")],
+  ["empty state is styled", () => expect(styles).toContain(".pc-pattern-empty-state")],
+  ["recent empty state is styled", () => expect(styles).toContain(".pc-pattern-recent-empty")],
+  ["small mobile titles remain compact", () => expect(styles).toContain("font-size: 1.74rem;")],
+];
+
+describe("Patterns tab implementation", () => {
+  it.each(checks)("%s", (_label, check) => {
+    check();
+  });
+});
